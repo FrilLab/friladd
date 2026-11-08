@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Verify release versions
+        shell: bash
+        run: |
+          CARGO_VERSION="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          NPM_VERSION="$(node -p "require('./npm/package.json').version")"
+          test "${GITHUB_REF_NAME}" = "v${CARGO_VERSION}"
+          test "${CARGO_VERSION}" = "${NPM_VERSION}"
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked
+
+  native-builds:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Prepare target-named binary
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/friladd-artifact"
+          if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
+            cp "target/${TARGET_TRIPLE}/release/friladd.exe" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}.exe"
+          else
+            cp "target/${TARGET_TRIPLE}/release/friladd" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: ${{ runner.temp }}/friladd-artifact/*
+          if-no-files-found: error
+          retention-days: 14
+
+  npm-package:
+    needs: native-builds
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.package-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - id: package-version
+        name: Read npm package version
+        run: |
+          echo "version=$(node -p 'require("./npm/package.json").version')" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/friladd-native
+      - run: node npm/scripts/stage-native.mjs --artifacts "${{ runner.temp }}/friladd-native"
+      - run: node npm/scripts/validate-package.mjs
+      - run: mkdir -p "${{ runner.temp }}/friladd-npm" && npm pack ./npm --pack-destination "${{ runner.temp }}/friladd-npm"
+      - run: node npm/scripts/smoke-pack.mjs "${{ runner.temp }}/friladd-npm/friladd-${{ steps.package-version.outputs.version }}.tgz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: friladd-npm-tarball
+          path: ${{ runner.temp }}/friladd-npm/friladd-${{ steps.package-version.outputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  npm-platform-smoke:
+    needs: npm-package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: macos-15
+          - os: macos-15-intel
+          - os: windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: friladd-npm-tarball
+          path: ${{ runner.temp }}/friladd-npm
+      - name: Test the packed CLI on this platform
+        run: node npm/scripts/smoke-pack.mjs "${{ runner.temp }}/friladd-npm/friladd-${{ needs.npm-package.outputs.version }}.tgz"
+
+  github-release:
+    needs: [verify, native-builds, npm-platform-smoke]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/release-assets
+      - uses: actions/download-artifact@v8
+        with:
+          name: friladd-npm-tarball
+          path: ${{ runner.temp }}/release-assets
+      - name: Reject an existing release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "A GitHub Release already exists for ${GITHUB_REF_NAME}; refusing to replace it."
+            exit 1
+          fi
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" "${RUNNER_TEMP}"/release-assets/* \
+            --title "FrilAdd ${GITHUB_REF_NAME}" \
+            --generate-notes
+
+  npm-publish:
+    if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
+    needs: [verify, npm-package, npm-platform-smoke, github-release]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          package-manager-cache: false
+          registry-url: https://registry.npmjs.org
+      - run: npm install --global npm@^11.5.1
+      - uses: actions/download-artifact@v8
+        with:
+          name: friladd-npm-tarball
+          path: ${{ runner.temp }}/friladd-npm
+      - name: Verify npm package exists for the configured publisher
+        run: |
+          if ! npm view friladd name >/dev/null 2>&1; then
+            echo "No public friladd package exists. An npm maintainer must claim the package and complete the first verified publish before Trusted Publishing can be configured."
+            exit 1
+          fi
+      - name: Refuse duplicate npm versions
+        run: |
+          VERSION="$(node -p "require('./npm/package.json').version")"
+          if npm view "friladd@${VERSION}" version >/dev/null 2>&1; then
+            echo "friladd@${VERSION} already exists on npm; refusing to publish a duplicate."
+            exit 1
+          fi
+      - name: Publish with npm Trusted Publishing
+        run: npm publish "${{ runner.temp }}/friladd-npm/friladd-${{ needs.npm-package.outputs.version }}.tgz" --provenance --access public
+      - name: Verify published command
+        run: npx --yes "friladd@${{ needs.npm-package.outputs.version }}" --version
