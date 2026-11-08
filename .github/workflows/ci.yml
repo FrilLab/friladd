@@ -114,4 +114,6 @@ jobs:
           name: friladd-npm-tarball
           path: ${{ runner.temp }}/friladd-npm
       - name: Test the packed CLI on this platform
+        env:
+          FRILADD_REMOTE_REGISTRY_URL: https://raw.githubusercontent.com/${{ github.event.pull_request.head.repo.full_name || github.repository }}/${{ github.event.pull_request.head.ref || github.ref_name }}/registry/registry.json
         run: node npm/scripts/smoke-pack.mjs "${{ runner.temp }}/friladd-npm/friladd-${{ needs.npm-package.outputs.version }}.tgz"

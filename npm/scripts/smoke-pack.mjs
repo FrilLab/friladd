@@ -56,7 +56,31 @@ try {
       fs.readFileSync(path.join(project, target)),
     );
   }
-  console.log('npm consumer smoke test passed: help/version, argument and exit-code forwarding, and two-file local install');
+  const remoteRegistry = process.env.FRILADD_REMOTE_REGISTRY_URL;
+  if (remoteRegistry) {
+    const remoteProject = path.join(consumer, 'remote-project');
+    fs.mkdirSync(remoteProject);
+    const remoteAdd = invoke([
+      'add',
+      'envelope-reveal',
+      '--registry',
+      remoteRegistry,
+      '--project',
+      remoteProject,
+    ]);
+    assert.equal(remoteAdd.status, 0, `${remoteAdd.stdout}\n${remoteAdd.stderr}`);
+    for (const [source, target] of [
+      ['EnvelopeReveal.tsx', 'src/components/envelope-reveal/EnvelopeReveal.tsx'],
+      ['envelope-reveal.css', 'src/components/envelope-reveal/envelope-reveal.css'],
+    ]) {
+      assert.deepEqual(
+        fs.readFileSync(path.join(repoRoot, 'registry', 'fixtures', 'envelope-reveal', source)),
+        fs.readFileSync(path.join(remoteProject, target)),
+      );
+    }
+  }
+  const remoteResult = remoteRegistry ? ' and two-file HTTPS install' : '';
+  console.log(`npm consumer smoke test passed: help/version, argument and exit-code forwarding, and two-file local install${remoteResult}`);
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }
