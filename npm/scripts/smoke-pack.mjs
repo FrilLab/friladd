@@ -74,7 +74,7 @@ try {
       ['envelope-reveal.css', 'src/components/envelope-reveal/envelope-reveal.css'],
     ]) {
       assert.deepEqual(
-        fs.readFileSync(path.join(repoRoot, 'registry', 'fixtures', 'envelope-reveal', source)),
+        fs.readFileSync(path.join(installedPackage, 'registry', 'fixtures', 'envelope-reveal', source)),
         fs.readFileSync(path.join(remoteProject, target)),
       );
     }
