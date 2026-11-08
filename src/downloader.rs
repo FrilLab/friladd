@@ -131,10 +131,16 @@ fn fetch_url_with_root(
         .redirect(redirect_policy)
         .build()
         .map_err(|error| format!("Cannot create HTTPS client: {error}"))?;
-    let response = client
-        .get(url.clone())
-        .send()
-        .map_err(|error| format!("Could not download {label} from {url}: {error}"))?;
+    let response = client.get(url.clone()).send().map_err(|error| {
+        let reason = if error.is_timeout() {
+            "request timed out"
+        } else if error.is_connect() {
+            "could not establish a connection"
+        } else {
+            "request failed"
+        };
+        format!("Could not download {label} from {url} ({reason}): {error}")
+    })?;
     if !response.status().is_success() {
         return Err(format!(
             "Download of {label} failed with HTTP {} ({})",
