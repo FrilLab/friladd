@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "name": "local-dev",
+  "items": [
+    {
+      "name": "envelope-reveal",
+      "description": "An interactive envelope component."
+    },
+    {
+      "name": "photo-stack",
+      "description": "An interactive stack of photos."
+    }
+  ]
+}

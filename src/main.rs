@@ -1,12 +1,13 @@
-use std::{env, process};
+mod registry;
+
+use registry::load_registry;
+use std::{env, path::Path, process};
 
 fn main() {
-    // Collect arguments, excluding the executable name.
     let args: Vec<String> = env::args().skip(1).collect();
 
     if let Err(message) = run(&args) {
         eprintln!("Error: {message}");
-        eprintln!("Run 'friladd help' for usage.");
         process::exit(2);
     }
 }
@@ -23,8 +24,14 @@ fn run(args: &[String]) -> Result<(), String> {
                 return Err("Usage: friladd list".to_string());
             }
 
-            println!("Available components (sample data):");
-            println!("- envelope-reveal");
+            let registry = load_registry(Path::new("registry/registry.json"))?;
+
+            println!("Available components ({}):", registry.name);
+
+            for item in &registry.items {
+                println!("- {}: {}", item.name, item.description);
+            }
+
             Ok(())
         }
 
@@ -33,8 +40,18 @@ fn run(args: &[String]) -> Result<(), String> {
                 return Err("Usage: friladd add <component>".to_string());
             }
 
-            println!("Selected component: {}", args[1]);
+            let registry = load_registry(Path::new("registry/registry.json"))?;
+
+            let name = &args[1];
+
+            let item = registry
+                .find(name)
+                .ok_or_else(|| format!("Component not found: {name}"))?;
+
+            println!("Selected component: {}", item.name);
+            println!("Description: {}", item.description);
             println!("No files have been installed yet.");
+
             Ok(())
         }
 
@@ -59,17 +76,13 @@ mod tests {
     fn unknown_command_returns_error() {
         let args = vec!["delete".to_string()];
 
-        let result = run(&args);
-
-        assert!(result.is_err());
+        assert!(run(&args).is_err());
     }
 
     #[test]
     fn add_without_name_returns_error() {
         let args = vec!["add".to_string()];
 
-        let result = run(&args);
-
-        assert!(result.is_err());
+        assert!(run(&args).is_err());
     }
 }
