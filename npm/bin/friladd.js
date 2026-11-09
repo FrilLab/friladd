@@ -15,19 +15,28 @@ const targets = {
 const platform = `${process.platform}-${process.arch}`;
 const binaryName = targets[platform];
 if (!binaryName) {
-  console.error(`FrilAdd does not provide a native binary for ${platform}. Supported targets: macOS ARM64, macOS x64, Linux x64, and Windows x64.`);
+  console.error(
+    `FrilAdd does not provide a native binary for ${platform}. Supported targets: macOS ARM64, macOS x64, Linux x64, and Windows x64.`,
+  );
   process.exit(1);
 }
 
 const binaryPath = path.join(__dirname, '..', 'native', binaryName);
 if (!fs.existsSync(binaryPath)) {
-  console.error(`FrilAdd's ${platform} executable is missing from this npm package. Reinstall friladd@${require('../package.json').version} or report the incomplete package at https://github.com/FrilLab/friladd/issues.`);
+  console.error(
+    `FrilAdd's ${platform} executable is missing from this npm package. Reinstall friladd@${require('../package.json').version} or report the incomplete package at https://github.com/FrilLab/friladd/issues.`,
+  );
   process.exit(1);
 }
 
-const result = spawnSync(binaryPath, process.argv.slice(2), { stdio: 'inherit', windowsHide: true });
+const result = spawnSync(binaryPath, process.argv.slice(2), {
+  stdio: 'inherit',
+  windowsHide: true,
+});
 if (result.error) {
-  console.error(`Could not start FrilAdd's native executable: ${result.error.message}`);
+  console.error(
+    `Could not start FrilAdd's native executable: ${result.error.message}`,
+  );
   process.exit(1);
 }
 process.exit(result.status === null ? 1 : result.status);

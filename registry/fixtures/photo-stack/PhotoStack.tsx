@@ -1,4 +1,4 @@
-import "./photo-stack.css";
+import './photo-stack.css';
 
 export function PhotoStack({ photos }: { photos: string[] }) {
   return (

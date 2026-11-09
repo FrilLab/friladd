@@ -2,7 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const packageDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const packageDir = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 const repoRoot = path.resolve(packageDir, '..');
 const [mode, inputDir] = process.argv.slice(2);
 if (mode !== '--artifacts' || !inputDir) {
@@ -19,7 +22,9 @@ const artifactDir = path.resolve(inputDir);
 const nativeDir = path.join(packageDir, 'native');
 fs.mkdirSync(nativeDir, { recursive: true });
 for (const [target, outputName] of mappings) {
-  const inputName = target.endsWith('windows-msvc') ? `friladd-${target}.exe` : `friladd-${target}`;
+  const inputName = target.endsWith('windows-msvc')
+    ? `friladd-${target}.exe`
+    : `friladd-${target}`;
   const source = path.join(artifactDir, inputName);
   if (!fs.existsSync(source)) {
     console.error(`Missing build artifact: ${source}`);
@@ -30,5 +35,8 @@ for (const [target, outputName] of mappings) {
   if (!outputName.endsWith('.exe')) fs.chmodSync(destination, 0o755);
   console.log(`Staged ${target}`);
 }
-fs.cpSync(path.join(repoRoot, 'registry'), path.join(packageDir, 'registry'), { recursive: true, force: true });
+fs.cpSync(path.join(repoRoot, 'registry'), path.join(packageDir, 'registry'), {
+  recursive: true,
+  force: true,
+});
 console.log('Staged local registry consumer fixture');
