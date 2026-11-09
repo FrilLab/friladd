@@ -1,0 +1,28 @@
+{
+  "name": "friladd",
+  "version": "0.1.0",
+  "description": "Install selected source files from versioned registries",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FrilLab/friladd.git"
+  },
+  "homepage": "https://github.com/FrilLab/friladd#readme",
+  "bin": {
+    "friladd": "bin/friladd.js"
+  },
+  "scripts": {
+    "test:package": "node scripts/test-package.mjs",
+    "test:package:validate": "node scripts/validate-package.mjs"
+  },
+  "files": [
+    "bin/friladd.js",
+    "native/",
+    "registry/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked
+
+  native-builds:
+    needs: rust-checks
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Prepare target-named binary
+        shell: bash
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/friladd-artifact"
+          if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
+            cp "target/${TARGET_TRIPLE}/release/friladd.exe" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}.exe"
+          else
+            cp "target/${TARGET_TRIPLE}/release/friladd" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}"
+          fi
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.target }}
+          path: ${{ runner.temp }}/friladd-artifact/*
+          if-no-files-found: error
+          retention-days: 7
+
+  npm-package:
+    needs: native-builds
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.package-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - id: package-version
+        name: Read npm package version
+        run: |
+          echo "version=$(node -p 'require("./npm/package.json").version')" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: native-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/friladd-native
+      - run: node npm/scripts/stage-native.mjs --artifacts "${{ runner.temp }}/friladd-native"
+      - run: node npm/scripts/validate-package.mjs
+      - run: mkdir -p "${{ runner.temp }}/friladd-npm" && npm pack ./npm --pack-destination "${{ runner.temp }}/friladd-npm"
+      - run: node npm/scripts/smoke-pack.mjs "${{ runner.temp }}/friladd-npm/friladd-${{ steps.package-version.outputs.version }}.tgz"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: friladd-npm-tarball
+          path: ${{ runner.temp }}/friladd-npm/friladd-${{ steps.package-version.outputs.version }}.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  npm-platform-smoke:
+    needs: npm-package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+          - os: macos-15
+          - os: macos-15-intel
+          - os: windows-2025
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: friladd-npm-tarball
+          path: ${{ runner.temp }}/friladd-npm
+      - name: Test the packed CLI on this platform
+        env:
+          FRILADD_REMOTE_REGISTRY_URL: https://raw.githubusercontent.com/${{ github.event.pull_request.head.repo.full_name || github.repository }}/${{ github.event.pull_request.head.ref || github.ref_name }}/registry/registry.json
+        run: node npm/scripts/smoke-pack.mjs "${{ runner.temp }}/friladd-npm/friladd-${{ needs.npm-package.outputs.version }}.tgz"

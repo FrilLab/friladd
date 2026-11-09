@@ -1,0 +1,32 @@
+.envelope-reveal {
+  display: grid;
+  justify-items: center;
+  gap: 1rem;
+  max-width: 24rem;
+  padding: 1.5rem;
+  border: 1px solid #d7c6aa;
+  border-radius: 0.75rem;
+  background: #fffaf1;
+  color: #342b25;
+}
+
+.envelope-reveal__letter {
+  min-height: 3rem;
+  display: grid;
+  place-items: center;
+  opacity: 0.72;
+  transition: opacity 180ms ease;
+}
+
+.envelope-reveal.is-open .envelope-reveal__letter {
+  opacity: 1;
+}
+
+.envelope-reveal button {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.65rem 1rem;
+  background: #8b4b35;
+  color: white;
+  cursor: pointer;
+}

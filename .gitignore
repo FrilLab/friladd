@@ -1,0 +1,4 @@
+/target/
+/npm/native/*
+!/npm/native/.gitkeep
+/npm/registry/

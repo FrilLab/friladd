@@ -1,95 +1,201 @@
 # FrilAdd
 
-**Install only what you need.**
+**Install only the source files you select.** FrilAdd is a standalone Rust CLI that reads a small, versioned JSON registry and installs the declared files for one item into a project. It does not depend on FrilCraft and can be used with any registry that follows the FrilAdd manifest format.
 
-FrilAdd is a planned, standalone command-line tool written in Rust for adding individual components, templates, and other reusable source files to existing projects.
+## Status
 
-The goal is to provide a small, predictable, and safe installation experience without requiring developers to install an entire UI library.
+The Rust CLI, local fixture, HTTPS downloader, installer, tests, npm package wrapper, and GitHub Actions release workflow are implemented for **v0.1.0**. npm publication is conditional on package ownership and Trusted Publishing being configured for the publishing account.
 
-> **Status: Planning.** This repository documents the idea and learning roadmap. The CLI is not implemented, released, or published to npm yet. Commands below illustrate the intended experience and do not work yet.
+## What it does
 
-## Planned usage
+- Lists the items in an explicitly selected local or HTTPS registry.
+- Plans or installs only the selected item's declared files.
+- Checks manifest structure and source/destination paths before installation.
+- Verifies every downloaded file against its declared SHA-256 digest.
+- Refuses existing files, symlinks in the destination path, path traversal, and unsupported file types.
+- Keeps downloaded files as source code; it never executes them or invokes npm.
 
-```bash
-# Add a single component from a registry
-npx friladd add frilcraft/envelope-reveal
+FrilAdd does not resolve registry aliases, discover components, install package dependencies, update or uninstall files, or provide general shadcn Registry compatibility.
 
-# List available items
-npx friladd list frilcraft
+## Quick start from this repository
 
-# Preview file changes without installing
-npx friladd add frilcraft/envelope-reveal --dry-run
+Requirements: Rust stable (edition 2024) and Cargo. To build and try the local fixture:
+
+```sh
+cargo build --release
+./target/release/friladd --help
+./target/release/friladd --version
+./target/release/friladd list --registry registry/registry.json
+
+mkdir -p /tmp/friladd-consumer
+./target/release/friladd add envelope-reveal \
+  --registry registry/registry.json \
+  --project /tmp/friladd-consumer \
+  --dry-run
+./target/release/friladd add envelope-reveal \
+  --registry registry/registry.json \
+  --project /tmp/friladd-consumer
 ```
 
-FrilAdd will be a **general-purpose installer**, not a FrilCraft-specific tool. FrilCraft is intended to be its first integration and test case; other registries should be able to use the same installer.
+The final command writes two files under `/tmp/friladd-consumer/src/components/envelope-reveal/`. Existing files are never overwritten. Run it in a disposable project directory or use `--dry-run` first.
 
-## How it is intended to work
+## CLI
 
 ```text
-npx friladd add <registry/item>
-             |
-             v
-       npm CLI entrypoint
-             |
-             v
-      Rust native binary
-             |
-             v
-    Read registry manifest
-             |
-             v
-    Validate files and paths
-             |
-             v
-   Preview or apply installation
-             |
-             v
-        User project
+friladd --help
+friladd --version
+friladd list --registry <path-or-https-url>
+friladd add <item> --registry <path-or-https-url> [--project <directory>] [--dry-run]
 ```
 
-The npm package will launch a platform-specific Rust binary. The file download and installation logic will be implemented in Rust, not in the JavaScript wrapper.
+`--registry` is required. A local path is resolved from the current directory. Registry file sources are resolved relative to the manifest's directory. Remote registries must use HTTPS; their relative file sources are resolved against the final manifest URL, and their initial source URLs must remain on that HTTPS origin.
 
-## Initial scope
+Examples using this repository's fixture:
 
-The first version should focus on:
+```sh
+friladd list --registry ./registry/registry.json
+friladd add envelope-reveal --registry ./registry/registry.json --dry-run
+friladd add envelope-reveal --registry ./registry/registry.json --project ./my-app
+```
 
-1. Parsing `list` and `add` commands.
-2. Reading a small, versioned registry manifest.
-3. Showing the installation plan with `--dry-run`.
-4. Installing selected files into an existing project.
-5. Rejecting unsafe paths and preventing accidental overwrites.
-6. Reporting clear errors and testing install behavior in temporary project directories.
+After the v0.1.0 tag is published, the repository fixture can also be used remotely:
 
-No authentication, UI framework, database, package publishing automation, or custom visual editor is planned for the initial implementation.
+```sh
+friladd add envelope-reveal \
+  --registry https://raw.githubusercontent.com/FrilLab/friladd/v0.1.0/registry/registry.json \
+  --dry-run
+```
 
-## Development roadmap
+This remote example becomes available when that tagged registry is present on GitHub. No currently deployed FrilCraft registry is assumed.
 
-- **Phase 1 — Learn the fundamentals:** Build a minimal Rust CLI and support a local test registry.
-- **Phase 2 — Install safely:** Add remote manifests, download validation, path safety, file collision handling, and tests.
-- **Phase 3 — Distribute:** Compile binaries for supported operating systems and connect them to an npm CLI package for `npx` usage.
-- **Later, if useful:** Support additional registry formats and dependency management based on real use cases.
+### Dry run
 
-## Design principles
+`--dry-run` uses the same manifest parsing, destination planning, and content acquisition and hash checks as installation. It prints each planned destination and any existing-file conflict. It creates no project directories and changes no project files. For remote registries, it may download the manifest and declared source files to check their hashes.
 
-- **Independent:** No runtime coupling to FrilCraft or any single registry.
-- **Explicit:** Show which files will be added or changed.
-- **Safe by default:** Do not overwrite existing files without explicit approval; reject path traversal and unexpected destinations.
-- **Small:** Install only the requested item and its declared requirements.
-- **Reproducible:** Prefer versioned manifests and verifiable file content.
-- **Learn by building:** Keep the implementation understandable and document design decisions as it develops.
+## Registry manifest v1
 
-## Technology choices (planned)
+The registry format is independent of FrilCraft. See [docs/registry-format.md](docs/registry-format.md) for the complete rules. A minimal working manifest is:
 
-- **Rust** for command parsing, registry handling, downloading, and file installation.
-- **Node.js/npm** only as a distribution and execution entrypoint for `npx`.
-- **GitHub Actions** for automated tests and platform-specific release builds when the CLI is ready.
+```json
+{
+  "schemaVersion": 1,
+  "name": "local-dev",
+  "items": [
+    {
+      "name": "envelope-reveal",
+      "description": "A small interactive envelope sample for local development.",
+      "files": [
+        {
+          "source": "fixtures/envelope-reveal/EnvelopeReveal.tsx",
+          "target": "src/components/envelope-reveal/EnvelopeReveal.tsx",
+          "sha256": "b79fa8da51029c794ef1293811c9994380cb77568027bb640c5fb26fbc288a51"
+        },
+        {
+          "source": "fixtures/envelope-reveal/envelope-reveal.css",
+          "target": "src/components/envelope-reveal/envelope-reveal.css",
+          "sha256": "513830c41af1ed42684d795b06565699f3c9ac711bb21b9460e976337581493a"
+        }
+      ]
+    }
+  ]
+}
+```
 
-Useful Rust crates will be selected as each phase is implemented, rather than adding dependencies in advance.
+The sample files live under `registry/fixtures/` and are not represented as published FrilCraft components. To generate a digest for a file, use `shasum -a 256 path/to/file` on macOS/Linux or `Get-FileHash -Algorithm SHA256 path\to\file` in PowerShell.
 
-## Relationship to FrilCraft
+## Installation safety
 
-[FrilCraft](https://github.com/FrilLab/frilcarft) builds reusable interactive web components. FrilAdd will eventually be able to install those components, but neither project should require the other to develop or run.
+- Manifest schema version 1 is required. Unknown fields, invalid names, duplicate item names, duplicate target paths, missing fields, and malformed SHA-256 digests are rejected.
+- `source` and `target` are relative slash-separated paths. Absolute paths, empty segments, `.`/`..`, backslashes, drive letters, UNC paths, Windows device names such as `NUL`, trailing dots, URL syntax, and non-portable path characters are rejected.
+- A local source must be a regular file inside the manifest directory. Symlinks in source paths are rejected.
+- Target ancestors are checked component by component. Any symlink is rejected, including one that currently resolves inside the project. Existing target files are reported as conflicts and block installation.
+- Registry manifests are limited to 1 MiB. Each source file is limited to 10 MiB. HTTPS uses a 5-second connect timeout, a 30-second request timeout, and at most five redirects; redirects must stay on HTTPS. Hash verification applies after redirects.
+- All selected contents are acquired and hash-verified before the installer creates project directories. Files are staged beside their destinations, then added with a no-overwrite hard link. On a later failure, FrilAdd removes its installed files, temporary files, and newly created empty directories where possible.
+- A manifest's digest detects content that differs from that manifest; it is not a signature or publisher identity. Review the registry and source code you choose to trust.
+
+The filesystem checks protect against accidental traversal and existing symlinks. Like a normal cross-platform CLI using standard filesystem APIs, FrilAdd cannot lock a project against another process that maliciously swaps directories between checks and writes. Install into a project that is not being concurrently modified by an untrusted process. Rollback is best effort if the filesystem itself refuses cleanup; successful file creation is atomic per file, not as one all-or-nothing multi-file transaction.
+
+## npm and npx
+
+The package name configured for distribution is `friladd`; its `bin` entry exposes the command `friladd`. The package includes the Rust executables for macOS ARM64, macOS x64, Linux x64, and Windows x64. The small Node wrapper only selects that executable, forwards arguments and terminal streams, and returns its exit status.
+
+Once `friladd@0.1.0` is published, valid invocations are:
+
+```sh
+npx friladd --help
+npx friladd add envelope-reveal \
+  --registry https://raw.githubusercontent.com/FrilLab/friladd/v0.1.0/registry/registry.json \
+  --dry-run
+```
+
+Before publication, `npm run test:package --prefix npm` stages the current host's release binary, packs the npm directory, installs that tarball into a temporary consumer project, checks argument and exit-code forwarding, performs the two-file fixture install, and verifies byte-for-byte output. The cross-platform CI/release package job checks that all four executables are present before packing, then runs the packed package on each supported runner.
+
+## FrilCraft integration
+
+FrilAdd does not import FrilCraft code. FrilCraft can publish a versioned manifest beside its component files:
+
+```text
+FrilCraft source files
+        |
+        v
+Versioned FrilAdd registry manifest
+        |
+        v
+FrilAdd CLI
+        |
+        v
+Developer's React project
+```
+
+For a deployed FrilCraft manifest, set its actual HTTPS URL and run:
+
+```sh
+FRILCRAFT_REGISTRY_URL="https://your-frilcraft-host.example/registry/registry.json"
+npx friladd add envelope-reveal --registry "$FRILCRAFT_REGISTRY_URL" --project ./my-app
+```
+
+The URL above is a placeholder: FrilCraft has not been confirmed to host a compatible registry. Each manifest can expose selected source files without requiring developers to clone the full FrilCraft repository. FrilAdd does not install any declared npm dependencies; component authors should document those requirements for users.
+
+## Development and tests
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+npm run test:package --prefix npm
+```
+
+Rust filesystem tests use temporary directories. The consumer fixture at `fixtures/consumer-project/` is copied into temporary locations; tests do not write to real projects. Network limits, interrupted reads, checksum mismatches, rejected HTTP, registry validation, planner safety, conflicts, dry runs, and installation behavior have deterministic tests.
+
+## Contributor flow
+
+```text
+CLI
+  -> Registry Loader
+  -> Manifest Validation
+  -> Installation Planner
+  -> File Acquisition + Hash Verification
+  -> Safe Installer
+  -> Result
+```
+
+The modules are `cli.rs`, `registry.rs`, `planner.rs`, `downloader.rs`, and `installer.rs`. Keep the manifest and installer independent of any one component library.
+
+## CI and release
+
+`.github/workflows/ci.yml` runs formatting, Clippy, tests, native builds, npm package validation, and packed consumer smoke tests, using Cargo caches for development runs. `.github/workflows/release.yml` runs on version tags, verifies the tag against Cargo and npm versions, performs clean uncached builds, waits for all supported platform package smoke tests, and attaches the four binaries plus the npm tarball to a GitHub Release.
+
+For the initial v0.1.0 release, merge the implementation and push the `v0.1.0` tag with `NPM_PUBLISH_ENABLED` unset. The workflow will build and test the complete package and attach it to the GitHub Release. An authorized npm maintainer can then publish that verified tarball and complete the publisher setup. For later versions, set up Trusted Publishing first and set `NPM_PUBLISH_ENABLED=true` before pushing the version tag.
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+An authorized npm maintainer must confirm that FrilLab can publish the unscoped name `friladd`. For the initial package, leave `NPM_PUBLISH_ENABLED` unset, then manually publish the verified `friladd-0.1.0.tgz` attached to the GitHub Release if npm needs an initial authenticated publish to create package settings. Configure the npm Trusted Publisher with organization `FrilLab`, repository `friladd`, workflow filename `release.yml`, and permission for direct `npm publish`. Set the repository variable `NPM_PUBLISH_ENABLED=true` only for a later version that has not already been published. If `friladd` cannot be claimed, verify control of the `@frillab` scope before changing the package name and release configuration.
+
+Without that variable the release workflow builds and validates artifacts but skips npm publishing. The release workflow uses OIDC and short-lived npm credentials; it stores no npm token. npm Trusted Publishing requires Node 22.14+ and npm CLI 11.5.1+; the workflow sets up Node 24 and the required npm CLI. Package settings, ownership, and a successful publisher configuration cannot be validated from this workspace.
 
 ## License
 
-A license has not yet been added to this repository. Choose one before publishing reusable source code; MIT is a candidate.
+MIT. See [LICENSE](LICENSE).

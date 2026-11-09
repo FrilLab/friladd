@@ -1,0 +1,18 @@
+.photo-stack {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem;
+}
+
+.photo-stack img {
+  width: 4rem;
+  height: 4rem;
+  margin-left: -0.75rem;
+  border: 3px solid white;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.photo-stack img:first-child {
+  margin-left: 0;
+}

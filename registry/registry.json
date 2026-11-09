@@ -4,11 +4,35 @@
   "items": [
     {
       "name": "envelope-reveal",
-      "description": "An interactive envelope component."
+      "description": "A small interactive envelope sample for local development.",
+      "files": [
+        {
+          "source": "fixtures/envelope-reveal/EnvelopeReveal.tsx",
+          "target": "src/components/envelope-reveal/EnvelopeReveal.tsx",
+          "sha256": "b79fa8da51029c794ef1293811c9994380cb77568027bb640c5fb26fbc288a51"
+        },
+        {
+          "source": "fixtures/envelope-reveal/envelope-reveal.css",
+          "target": "src/components/envelope-reveal/envelope-reveal.css",
+          "sha256": "513830c41af1ed42684d795b06565699f3c9ac711bb21b9460e976337581493a"
+        }
+      ]
     },
     {
       "name": "photo-stack",
-      "description": "An interactive stack of photos."
+      "description": "A compact photo stack sample for local development.",
+      "files": [
+        {
+          "source": "fixtures/photo-stack/PhotoStack.tsx",
+          "target": "src/components/photo-stack/PhotoStack.tsx",
+          "sha256": "c5d10ff332252a1c157faf6db63e4044135dbbc743aef11f7c157ceb0eadccdc"
+        },
+        {
+          "source": "fixtures/photo-stack/photo-stack.css",
+          "target": "src/components/photo-stack/photo-stack.css",
+          "sha256": "9c10a078fd9963e77935bc1f71d2ac84f766acc56f50b3be4337149ce0e5183e"
+        }
+      ]
     }
   ]
 }
