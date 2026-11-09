@@ -97,6 +97,10 @@ pub fn load_registry(location: &str) -> Result<LoadedRegistry, String> {
     Ok(LoadedRegistry { registry, source })
 }
 
+pub fn validate_registry_location(location: &str) -> Result<(), String> {
+    load_registry(location).map(|_| ())
+}
+
 pub fn parse_registry(content: &str) -> Result<Registry, String> {
     if content.len() > MAX_MANIFEST_BYTES {
         return Err(format!(

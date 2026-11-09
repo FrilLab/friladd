@@ -193,3 +193,233 @@ fn existing_targets_are_reported_and_never_overwritten() {
     );
     assert_eq!(fs::read(target).unwrap(), b"existing");
 }
+
+#[test]
+fn project_registries_defaults_and_qualified_aliases_install_correct_bytes() {
+    use sha2::{Digest, Sha256};
+    let root = tempdir().unwrap();
+    let project = root.path().join("consumer");
+    fs::create_dir_all(&project).unwrap();
+    let make_registry = |dir: &Path, item: &str, bytes: &[u8]| {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("component.txt"), bytes).unwrap();
+        let hash = Sha256::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
+        let json = format!(
+            r#"{{"schemaVersion":1,"name":"fixture","items":[{{"name":"{item}","description":"fixture","files":[{{"source":"component.txt","target":"out/{item}.txt","sha256":"{hash}"}}]}}]}}"#
+        );
+        fs::write(dir.join("registry.json"), json).unwrap();
+    };
+    let a = root.path().join("registry-a");
+    let b = root.path().join("registry-b");
+    make_registry(&a, "button", b"from-a");
+    make_registry(&b, "envelope-reveal", b"from-b");
+    let pa = a.join("registry.json").display().to_string();
+    let pb = b.join("registry.json").display().to_string();
+    let add_a = run_in(
+        &project,
+        &["registry", "add", "registry-a", &pa, "--default"],
+    );
+    assert!(
+        add_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_a.stderr)
+    );
+    let add_b = run_in(&project, &["registry", "add", "registry-b", &pb]);
+    assert!(
+        add_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_b.stderr)
+    );
+    let install_a = run_in(&project, &["add", "button"]);
+    assert!(
+        install_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install_a.stderr)
+    );
+    assert_eq!(fs::read(project.join("out/button.txt")).unwrap(), b"from-a");
+    let install_b = run_in(&project, &["add", "registry-b/envelope-reveal"]);
+    assert!(
+        install_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install_b.stderr)
+    );
+    assert_eq!(
+        fs::read(project.join("out/envelope-reveal.txt")).unwrap(),
+        b"from-b"
+    );
+    assert!(
+        run_in(&project, &["registry", "default", "registry-b"])
+            .status
+            .success()
+    );
+    let explicit_project = tempdir().unwrap();
+    let explicit_project_path = explicit_project.path().display().to_string();
+    let explicit = run_in(
+        &project,
+        &[
+            "add",
+            "button",
+            "--registry",
+            &pa,
+            "--project",
+            &explicit_project_path,
+            "--dry-run",
+        ],
+    );
+    assert!(
+        explicit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+}
+
+#[test]
+fn corrupt_project_configuration_blocks_install_without_writing_files() {
+    let project = tempdir().unwrap();
+    fs::write(project.path().join(".friladd.json"), "not json").unwrap();
+    let output = run_in(project.path(), &["add", "unknown"]);
+    assert!(!output.status.success());
+    assert!(!project.path().join("out").exists());
+}
+
+#[test]
+fn global_registration_uses_isolated_overridden_config_directory() {
+    use sha2::{Digest, Sha256};
+    let root = tempdir().unwrap();
+    let project = root.path().join("consumer");
+    fs::create_dir_all(&project).unwrap();
+    let registry_dir = root.path().join("global-registry");
+    fs::create_dir_all(&registry_dir).unwrap();
+    let contents = b"global bytes";
+    fs::write(registry_dir.join("component.txt"), contents).unwrap();
+    let hash = Sha256::digest(contents)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    fs::write(registry_dir.join("registry.json"), format!(r#"{{"schemaVersion":1,"name":"global-fixture","items":[{{"name":"sample","description":"fixture","files":[{{"source":"component.txt","target":"sample.txt","sha256":"{hash}"}}]}}]}}"#)).unwrap();
+    let config_dir = root.path().join("isolated-config");
+    let source = registry_dir.join("registry.json").display().to_string();
+    let add = std::process::Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", &config_dir)
+        .current_dir(&project)
+        .args([
+            "registry",
+            "add",
+            "global-fixture",
+            &source,
+            "--global",
+            "--default",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let install = std::process::Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", &config_dir)
+        .current_dir(&project)
+        .args(["add", "sample"])
+        .output()
+        .unwrap();
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    assert_eq!(fs::read(project.join("sample.txt")).unwrap(), contents);
+    assert!(!project.join(".friladd.json").exists());
+}
+
+#[test]
+fn bare_registry_json_path_remains_a_local_manifest() {
+    let root = tempdir().unwrap();
+    fs::copy(
+        repo_path("registry/registry.json"),
+        root.path().join("registry.json"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("fixtures/envelope-reveal")).unwrap();
+    fs::copy(
+        repo_path("registry/fixtures/envelope-reveal/EnvelopeReveal.tsx"),
+        root.path()
+            .join("fixtures/envelope-reveal/EnvelopeReveal.tsx"),
+    )
+    .unwrap();
+    fs::copy(
+        repo_path("registry/fixtures/envelope-reveal/envelope-reveal.css"),
+        root.path()
+            .join("fixtures/envelope-reveal/envelope-reveal.css"),
+    )
+    .unwrap();
+    let listed = run_in(root.path(), &["list", "--registry", "registry.json"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let project = root.path().join("consumer");
+    fs::create_dir(&project).unwrap();
+    let project = project.display().to_string();
+    let installed = run_in(
+        root.path(),
+        &[
+            "add",
+            "envelope-reveal",
+            "--registry",
+            "registry.json",
+            "--project",
+            &project,
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert_eq!(
+        fs::read(Path::new(&project).join("src/components/envelope-reveal/EnvelopeReveal.tsx"))
+            .unwrap(),
+        fs::read(repo_path(
+            "registry/fixtures/envelope-reveal/EnvelopeReveal.tsx"
+        ))
+        .unwrap()
+    );
+}
+
+#[test]
+fn registry_list_global_ignores_corrupt_project_config_and_marks_scope() {
+    let root = tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let global = root.path().join("global");
+    let registry = repo_path("registry/registry.json");
+    let add = std::process::Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", &global)
+        .current_dir(&project)
+        .args(["registry", "add", "global-one", &registry, "--global"])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    fs::write(project.join(".friladd.json"), "broken").unwrap();
+    let listed = std::process::Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", &global)
+        .current_dir(&project)
+        .args(["registry", "list", "--global"])
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("\tglobal"));
+}
