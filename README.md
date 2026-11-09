@@ -88,7 +88,7 @@ The registry format is independent of FrilCraft. See [docs/registry-format.md](d
         {
           "source": "fixtures/envelope-reveal/EnvelopeReveal.tsx",
           "target": "src/components/envelope-reveal/EnvelopeReveal.tsx",
-          "sha256": "b79fa8da51029c794ef1293811c9994380cb77568027bb640c5fb26fbc288a51"
+          "sha256": "aef017b275d8420fe22161db1e0db57edc916c0bd9a812dba09ffd573b003398"
         },
         {
           "source": "fixtures/envelope-reveal/envelope-reveal.css",
