@@ -143,7 +143,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          if gh release view "${GITHUB_REF_NAME}" --repo "FrilLab/friladd" >/dev/null 2>&1; then
             echo "A GitHub Release already exists for ${GITHUB_REF_NAME}; refusing to replace it."
             exit 1
           fi
@@ -152,7 +152,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" "${RUNNER_TEMP}"/release-assets/* \
-            --repo "${GITHUB_REPOSITORY}" \
+            --repo "FrilLab/friladd" \
             --title "FrilAdd ${GITHUB_REF_NAME}" \
             --generate-notes
 
