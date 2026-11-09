@@ -230,17 +230,19 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
             global,
             project: project_arg,
         } => {
-            let (pp, gp) = roots(project_arg)?;
-            let pc = config::load(&pp)?;
-            let gc = config::load(&gp)?;
             if global {
+                let gp = config::global_path()?;
+                let gc = config::load(&gp)?;
                 print_registry_entries(&gc, "global");
             } else {
+                let (pp, gp) = roots(project_arg)?;
+                let pc = config::load(&pp)?;
+                let gc = config::load(&gp)?;
                 print_registry_entries(&pc, "project");
                 for (a, e) in &gc.registries {
                     if !pc.registries.contains_key(a) {
                         println!(
-                            "{a}\t{}{}",
+                            "{a}\t{}\tglobal{}",
                             e.source,
                             if gc.default_registry.as_deref() == Some(a) {
                                 "\tdefault"

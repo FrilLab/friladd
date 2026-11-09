@@ -84,14 +84,21 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
 }
 
 pub fn load(path: &Path) -> Result<Config, String> {
-    if !path.exists() {
-        return Ok(Config {
-            schema_version: 1,
-            ..Config::default()
-        });
-    }
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|e| format!("Cannot inspect configuration {}: {e}", path.display()))?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Config {
+                schema_version: 1,
+                ..Config::default()
+            });
+        }
+        Err(error) => {
+            return Err(format!(
+                "Cannot inspect configuration {}: {error}",
+                path.display()
+            ));
+        }
+    };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(format!(
             "Configuration path must be a regular non-symlink file: {}",
@@ -205,6 +212,25 @@ mod tests {
         assert!(load(&p).is_err());
         fs::write(&p, r#"{"schemaVersion":2,"registries":{}}"#).unwrap();
         assert!(load(&p).unwrap_err().contains("Unsupported"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_symlink_is_not_treated_as_missing_configuration() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join(CONFIG_FILE);
+        symlink(d.path().join("missing-target"), &p).unwrap();
+        assert!(load(&p).unwrap_err().contains("non-symlink"));
+    }
+
+    #[test]
+    fn filesystem_errors_are_not_treated_as_missing_configuration() {
+        let d = tempfile::tempdir().unwrap();
+        let parent = d.path().join("file");
+        fs::write(&parent, "not a directory").unwrap();
+        let error = load(&parent.join(CONFIG_FILE)).unwrap_err();
+        assert!(error.contains("Cannot inspect configuration"));
     }
     #[test]
     fn writes_and_reads_config() {

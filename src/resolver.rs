@@ -4,6 +4,15 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 
+fn registered_alias_location(location: &str) -> bool {
+    !location.contains("://")
+        && config::validate_alias(location).is_ok()
+        && matches!(
+            Path::new(location).symlink_metadata(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+        )
+}
+
 pub struct Resolution {
     pub manifest: String,
     pub item: Option<String>,
@@ -43,7 +52,7 @@ pub fn resolve_add(
     }
     let item = if parts.len() == 2 { parts[1] } else { parts[0] };
     if let Some(location) = explicit {
-        if !location.contains("://") && config::validate_alias(location).is_ok() {
+        if registered_alias_location(location) {
             let project_config = config::load(project)?;
             let global_config = config::load(global)?;
             let (config, path) = if project_config.registries.contains_key(location) {
@@ -103,7 +112,7 @@ pub fn resolve_list(
     global: &Path,
 ) -> Result<String, String> {
     if let Some(location) = registry_arg {
-        if !location.contains("://") && config::validate_alias(location).is_ok() {
+        if registered_alias_location(location) {
             let pc = config::load(project)?;
             let gc = config::load(global)?;
             let (config, path) = if pc.registries.contains_key(location) {

@@ -334,3 +334,92 @@ fn global_registration_uses_isolated_overridden_config_directory() {
     assert_eq!(fs::read(project.join("sample.txt")).unwrap(), contents);
     assert!(!project.join(".friladd.json").exists());
 }
+
+#[test]
+fn bare_registry_json_path_remains_a_local_manifest() {
+    let root = tempdir().unwrap();
+    fs::copy(
+        repo_path("registry/registry.json"),
+        root.path().join("registry.json"),
+    )
+    .unwrap();
+    fs::create_dir_all(root.path().join("fixtures/envelope-reveal")).unwrap();
+    fs::copy(
+        repo_path("registry/fixtures/envelope-reveal/EnvelopeReveal.tsx"),
+        root.path()
+            .join("fixtures/envelope-reveal/EnvelopeReveal.tsx"),
+    )
+    .unwrap();
+    fs::copy(
+        repo_path("registry/fixtures/envelope-reveal/envelope-reveal.css"),
+        root.path()
+            .join("fixtures/envelope-reveal/envelope-reveal.css"),
+    )
+    .unwrap();
+    let listed = run_in(root.path(), &["list", "--registry", "registry.json"]);
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    let project = root.path().join("consumer");
+    fs::create_dir(&project).unwrap();
+    let project = project.display().to_string();
+    let installed = run_in(
+        root.path(),
+        &[
+            "add",
+            "envelope-reveal",
+            "--registry",
+            "registry.json",
+            "--project",
+            &project,
+        ],
+    );
+    assert!(
+        installed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert_eq!(
+        fs::read(Path::new(&project).join("src/components/envelope-reveal/EnvelopeReveal.tsx"))
+            .unwrap(),
+        fs::read(repo_path(
+            "registry/fixtures/envelope-reveal/EnvelopeReveal.tsx"
+        ))
+        .unwrap()
+    );
+}
+
+#[test]
+fn registry_list_global_ignores_corrupt_project_config_and_marks_scope() {
+    let root = tempdir().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir(&project).unwrap();
+    let global = root.path().join("global");
+    let registry = repo_path("registry/registry.json");
+    let add = std::process::Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", &global)
+        .current_dir(&project)
+        .args(["registry", "add", "global-one", &registry, "--global"])
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    fs::write(project.join(".friladd.json"), "broken").unwrap();
+    let listed = std::process::Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", &global)
+        .current_dir(&project)
+        .args(["registry", "list", "--global"])
+        .output()
+        .unwrap();
+    assert!(
+        listed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&listed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&listed.stdout).contains("\tglobal"));
+}
