@@ -130,6 +130,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           pattern: native-*
@@ -143,7 +144,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" --repo "FrilLab/friladd" >/dev/null 2>&1; then
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
             echo "A GitHub Release already exists for ${GITHUB_REF_NAME}; refusing to replace it."
             exit 1
           fi
@@ -151,10 +152,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" "${RUNNER_TEMP}"/release-assets/* \
-            --repo "FrilLab/friladd" \
-            --title "FrilAdd ${GITHUB_REF_NAME}" \
-            --generate-notes
+          NOTES_FILE="docs/releases/${GITHUB_REF_NAME}.md"
+          RELEASE_ARGS=(--repo "${GITHUB_REPOSITORY}" --title "FrilAdd ${GITHUB_REF_NAME}")
+          if [[ -f "${NOTES_FILE}" ]]; then
+            RELEASE_ARGS+=(--notes-file "${NOTES_FILE}")
+          else
+            RELEASE_ARGS+=(--generate-notes)
+          fi
+          gh release create "${GITHUB_REF_NAME}" "${RUNNER_TEMP}"/release-assets/* "${RELEASE_ARGS[@]}"
 
   npm-publish:
     if: ${{ vars.NPM_PUBLISH_ENABLED == 'true' }}
