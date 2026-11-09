@@ -1,6 +1,6 @@
 {
   "name": "friladd",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Install selected source files from versioned registries",
   "license": "MIT",
   "repository": {
@@ -17,8 +17,7 @@
   },
   "files": [
     "bin/friladd.js",
-    "native/",
-    "registry/",
+    "native/friladd-*",
     "README.md",
     "LICENSE"
   ],

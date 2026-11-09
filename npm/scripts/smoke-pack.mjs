@@ -15,6 +15,7 @@ const repoRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '../..',
 );
+const testRegistry = path.join(repoRoot, 'registry', 'registry.json');
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'friladd-npm-smoke-'));
 const consumer = path.join(tempRoot, 'consumer');
 fs.mkdirSync(consumer);
@@ -53,6 +54,11 @@ try {
   );
   assert.equal(install.status, 0, `${install.stdout}\n${install.stderr}`);
   const installedPackage = path.join(consumer, 'node_modules', 'friladd');
+  assert.equal(
+    fs.existsSync(path.join(installedPackage, 'registry')),
+    false,
+    'The published npm package must not contain the repository test registry',
+  );
   const configDir = path.join(tempRoot, 'global-config');
   const invoke = (args, cwd = consumer) =>
     run('npm', ['exec', '--yes', '--', 'friladd', ...args], cwd, {
@@ -74,7 +80,7 @@ try {
     'add',
     'does-not-exist',
     '--registry',
-    path.join(installedPackage, 'registry', 'registry.json'),
+    testRegistry,
   ]);
   assert.notEqual(
     bad.status,
@@ -89,12 +95,11 @@ try {
     path.join(repoRoot, 'fixtures', 'consumer-project', 'package.json'),
     path.join(project, 'package.json'),
   );
-  const registry = path.join(installedPackage, 'registry', 'registry.json');
   const add = invoke([
     'add',
     'envelope-reveal',
     '--registry',
-    registry,
+    testRegistry,
     '--project',
     project,
   ]);
@@ -109,7 +114,7 @@ try {
     assert.deepEqual(
       fs.readFileSync(
         path.join(
-          installedPackage,
+          repoRoot,
           'registry',
           'fixtures',
           'envelope-reveal',
@@ -252,7 +257,7 @@ try {
       assert.deepEqual(
         fs.readFileSync(
           path.join(
-            installedPackage,
+            repoRoot,
             'registry',
             'fixtures',
             'envelope-reveal',

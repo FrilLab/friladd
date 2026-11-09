@@ -1,0 +1,3 @@
+# Registry fixtures are SHA-256-addressed test data; never rewrite bytes on checkout.
+# -text preserves the checked-in bytes for text and binary fixtures on every OS.
+registry/fixtures/** -text

@@ -159,6 +159,8 @@ npx friladd add envelope-reveal
 
 The package provides native executables for macOS ARM64, macOS x64, Linux x64, and Windows x64. The platform-specific npm package checks run in CI.
 
+The repository `registry/` directory contains development and test fixtures only. It is **not shipped in the npm package**, and FrilAdd has no built-in or preferred component provider. Register an independent HTTPS Registry or supply your own local manifest with `--registry`. The repository fixtures remain available when developing or running tests from a source checkout.
+
 ## Third-party registries
 
 FrilAdd does not import FrilCraft code. FrilCraft can publish a versioned manifest beside its component files:

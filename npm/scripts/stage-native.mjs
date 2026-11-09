@@ -6,7 +6,6 @@ const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   '..',
 );
-const repoRoot = path.resolve(packageDir, '..');
 const [mode, inputDir] = process.argv.slice(2);
 if (mode !== '--artifacts' || !inputDir) {
   console.error('Usage: node scripts/stage-native.mjs --artifacts <directory>');
@@ -35,8 +34,3 @@ for (const [target, outputName] of mappings) {
   if (!outputName.endsWith('.exe')) fs.chmodSync(destination, 0o755);
   console.log(`Staged ${target}`);
 }
-fs.cpSync(path.join(repoRoot, 'registry'), path.join(packageDir, 'registry'), {
-  recursive: true,
-  force: true,
-});
-console.log('Staged local registry consumer fixture');

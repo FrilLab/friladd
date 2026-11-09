@@ -59,10 +59,6 @@ try {
     destination,
   );
   if (!packageBinary.endsWith('.exe')) fs.chmodSync(destination, 0o755);
-  fs.cpSync(path.join(repoRoot, 'registry'), path.join(npmDir, 'registry'), {
-    recursive: true,
-    force: true,
-  });
   const packedDir = path.join(tempRoot, 'packed');
   fs.mkdirSync(packedDir);
   run('npm', ['pack', npmDir, '--pack-destination', packedDir], repoRoot);
@@ -81,6 +77,5 @@ try {
 } finally {
   if (hadPrevious) fs.copyFileSync(backup, destination);
   else fs.rmSync(destination, { force: true });
-  fs.rmSync(path.join(npmDir, 'registry'), { recursive: true, force: true });
   fs.rmSync(tempRoot, { recursive: true, force: true });
 }

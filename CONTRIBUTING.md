@@ -28,6 +28,8 @@ The npm package smoke test builds and packs the native executable for the curren
 
 Tests that write files should use isolated temporary directories. Do not use the developer's real home configuration or mutate public registry contents in tests.
 
+The `registry/` directory is a repository-only test fixture; it must not be staged into the published npm tarball. Packed npm consumer tests use the repository fixture from the CI checkout. Fixture files are byte-sensitive because the manifest contains SHA-256 digests. `.gitattributes` disables checkout-time newline conversion in `registry/fixtures/` so macOS, Linux, and Windows test identical bytes. Update the manifest hashes when fixture contents change.
+
 ## Architecture
 
 The command flow resolves a manifest, loads and validates Registry Manifest v1, plans destinations, acquires and hash-verifies file contents, then installs them through the safe installer. Keep registry configuration (`.friladd.json`) separate from component manifests (`registry.json`). Registry sources are independent providers; do not add a provider-specific default, URL, or installation rule to the CLI.
