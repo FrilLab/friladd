@@ -3,7 +3,7 @@ use crate::{
     downloader, lockfile, planner, registry, resolver, transaction,
 };
 use clap::{Args, Parser, Subcommand};
-use std::{env, fs, path::PathBuf};
+use std::{env, fs, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -336,6 +336,7 @@ fn add(args: AddArgs) -> Result<(), String> {
                     .find(|record| record.target == candidate.target)
                 {
                     candidate.installed = installed.installed.clone();
+                    candidate.resolved_source = installed.resolved_source.clone();
                 }
             }
             comparable.files.sort_by(|a, b| a.target.cmp(&b.target));
@@ -395,8 +396,16 @@ fn add(args: AddArgs) -> Result<(), String> {
     } else {
         downloader::acquire_files(&loaded.source, &plan)?
     };
-    for (file, bytes) in plan.files.iter().zip(&contents) {
-        let installed = lockfile::Content::of(bytes);
+    for (file, acquired) in plan.files.iter().zip(&contents) {
+        let installed = lockfile::Content::of(&acquired.bytes);
+        if let Some(locator) = &acquired.resolved_locator
+            && let Some(record) = new_item
+                .files
+                .iter_mut()
+                .find(|record| record.target == file.target_display)
+        {
+            record.resolved_source = locator.clone();
+        }
         if v2_item.is_some_and(|v| {
             v.files
                 .iter()
@@ -419,11 +428,13 @@ fn add(args: AddArgs) -> Result<(), String> {
     }
     next.items.push(new_item);
     let mut edits = Vec::with_capacity(plan.files.len());
-    for (file, bytes) in plan.files.iter().zip(contents) {
+    for (file, acquired) in plan.files.iter().zip(contents) {
         edits.push(transaction::Edit {
             target: file.target_display.clone(),
             before: None,
-            write: Some(transaction::WriteSource::Bytes(bytes.to_vec())),
+            write: Some(transaction::WriteSource::Shared(Arc::clone(
+                &acquired.bytes,
+            ))),
         });
     }
     let transaction = transaction::Plan::new(before, next, edits)?;

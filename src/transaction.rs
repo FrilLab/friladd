@@ -31,6 +31,7 @@ const SCRATCH: &str = "scratch";
 #[derive(Debug)]
 pub enum WriteSource {
     Bytes(Vec<u8>),
+    Shared(std::sync::Arc<[u8]>),
     File(PathBuf),
 }
 
@@ -136,6 +137,7 @@ impl Plan {
             if let Some(input) = &self.edits[&expect.target].write {
                 let content = match input {
                     WriteSource::Bytes(bytes) => Content::of(bytes),
+                    WriteSource::Shared(bytes) => Content::of(bytes),
                     WriteSource::File(path) => fingerprint(path, lockfile::MAX_FILE_BYTES)?,
                 };
                 if expect.after.as_ref() != Some(&content) {
@@ -398,6 +400,12 @@ impl Project {
                     .ok_or("Missing staged bytes")?;
                 match write {
                     WriteSource::Bytes(bytes) => {
+                        if Content::of(&bytes) != *after {
+                            return Err(format!("Verified bytes changed for {}", expect.target));
+                        }
+                        write_small(&output, &bytes)?;
+                    }
+                    WriteSource::Shared(bytes) => {
                         if Content::of(&bytes) != *after {
                             return Err(format!("Verified bytes changed for {}", expect.target));
                         }
