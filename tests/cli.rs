@@ -233,6 +233,73 @@ fn installed_and_status_handle_empty_corrupt_and_unmanaged_queries() {
 }
 
 #[test]
+fn qualified_status_uses_registry_alias_even_when_a_same_named_path_exists() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["assets/model.bin"]).to_string(),
+    )
+    .unwrap();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    let manifest = manifest.display().to_string();
+    let project_path = project.path().display().to_string();
+    let registered = run_in(project.path(), &["registry", "add", "registry", &manifest]);
+    assert_eq!(registered.status.code(), Some(0), "{registered:?}");
+
+    // The repository working directory has a `registry/` directory. A qualified
+    // alias must still be resolved from project configuration.
+    let added = run(&["add", "registry/sample", "--project", &project_path]);
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let status = run(&[
+        "status",
+        "registry/sample",
+        "--project",
+        &project_path,
+        "--json",
+    ]);
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    let output: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(output["data"]["items"][0]["itemId"], "sample");
+    assert_eq!(output["data"]["items"][0]["files"][0]["state"], "unchanged");
+}
+
+#[test]
+fn qualified_status_keeps_local_lock_ownership_when_registry_is_removed() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["assets/model.bin"]).to_string(),
+    )
+    .unwrap();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    let manifest = manifest.display().to_string();
+    let registered = run_in(project.path(), &["registry", "add", "fixture", &manifest]);
+    assert_eq!(registered.status.code(), Some(0), "{registered:?}");
+    let added = run_in(project.path(), &["add", "fixture/sample"]);
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    fs::remove_file(&manifest).unwrap();
+
+    let status = run_in(
+        project.path(),
+        &[
+            "status",
+            "fixture/sample",
+            "--project",
+            project.path().to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    let output: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(output["data"]["items"][0]["itemId"], "sample");
+    assert_eq!(output["data"]["items"][0]["files"][0]["state"], "unchanged");
+}
+
+#[test]
 fn unqualified_duplicate_item_ids_require_a_provider_selector() {
     use friladd::lockfile::{Content, Item, Lock, OwnedFile, Provider, v1_provider_id};
     use sha2::{Digest, Sha256};

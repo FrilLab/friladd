@@ -759,7 +759,7 @@ fn resolve_provider_ids(
     project: &Path,
     global: &Path,
 ) -> Result<Vec<String>, String> {
-    let source = match resolver::resolve_list(Some(token), None, project, global) {
+    let source = match resolver::resolve_list(None, Some(token), project, global) {
         Ok(source) => source,
         Err(error) if error.contains("is not registered") => return Ok(Vec::new()),
         Err(error) => return Err(error),
@@ -771,10 +771,7 @@ fn resolve_provider_ids(
             url.to_string()
         })
     } else {
-        registry::canonical_local_manifest(&source)
-            .ok()
-            .and_then(|path| url::Url::from_file_path(path).ok())
-            .map(|url| url.to_string())
+        local_manifest_locator(&source)
     };
     let Some(locator) = locator else {
         return Ok(Vec::new());
@@ -785,6 +782,69 @@ fn resolve_provider_ids(
         .filter(|entry| entry.resolved_source == locator)
         .map(|entry| entry.provider_id.clone())
         .collect())
+}
+
+fn local_manifest_locator(source: &str) -> Option<String> {
+    let path = PathBuf::from(source);
+    match fs::symlink_metadata(&path) {
+        Ok(_) => registry::canonical_local_manifest(source)
+            .ok()
+            .and_then(|path| url::Url::from_file_path(path).ok())
+            .map(|url| url.to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let absolute = if path.is_absolute() {
+                path
+            } else {
+                env::current_dir().ok()?.join(path)
+            };
+            let normalized = normalize_absolute_path(&absolute)?;
+            let mut ancestor = normalized.as_path();
+            let mut missing = Vec::new();
+            loop {
+                match fs::symlink_metadata(ancestor) {
+                    Ok(metadata) => {
+                        if !metadata.is_dir() {
+                            return None;
+                        }
+                        let mut resolved = fs::canonicalize(ancestor).ok()?;
+                        for component in missing.iter().rev() {
+                            resolved.push(component);
+                        }
+                        return url::Url::from_file_path(resolved)
+                            .ok()
+                            .map(|url| url.to_string());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        missing.push(ancestor.file_name()?.to_os_string());
+                        ancestor = ancestor.parent()?;
+                    }
+                    Err(_) => return None,
+                }
+            }
+        }
+        Err(_) => None,
+    }
+}
+
+fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::Normal(name) => normalized.push(name),
+        }
+    }
+    Some(normalized)
 }
 
 fn verify_registry(args: ListArgs) -> Result<(), String> {
