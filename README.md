@@ -7,6 +7,7 @@
 - Lists items in a selected local or HTTPS registry, including registered aliases.
 - Registers independent project or global registries and resolves a configured default.
 - Plans or installs only the selected item's declared files.
+- Verifies every declared file in a registry before publication, without installing it.
 - Checks manifest structure and source/destination paths before installation.
 - Verifies every downloaded file against its declared SHA-256 digest.
 - Refuses existing files, symlinks in the destination path, path traversal, and unsupported file types.
@@ -45,6 +46,7 @@ friladd registry add <alias> <path-or-https-url> [--global] [--default]
 friladd registry list [--global]
 friladd registry default <alias> [--global]
 friladd registry remove <alias> [--global]
+friladd registry verify [<registry-alias>] [--registry <path-or-https-url>] [--project <directory>]
 friladd list [<registry-alias>] [--registry <path-or-https-url>]
 friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run]
 ```
@@ -97,6 +99,17 @@ friladd add frilcraft/envelope-reveal
 ```
 
 The URL above is illustrative; FrilAdd contains no built-in FrilCraft URL or provider logic. Any provider can publish a compatible Registry Manifest v1 and be registered without changes to FrilAdd.
+
+### Provider verification
+
+`friladd registry verify` checks the manifest and the SHA-256 digest of every declared source file using the same acquisition logic as installation. It exits nonzero for a missing, invalid, oversized, or changed source file. It does not create or change consumer files; unlike `add --dry-run`, it does not check consumer destination conflicts. A registry may be empty.
+
+```sh
+friladd registry verify --registry ./registry.json
+friladd registry verify frilcraft
+```
+
+The installer and verifier preserve exact bytes, including binary data such as GLB models, PNG textures, and audio. The current 10 MiB per-file limit still applies; verification is not a model, image, or audio format validator. Publish only reviewed assets with appropriate license notices. See [distribution roadmap](docs/distribution-roadmap.md) for proposed lifecycle and larger-asset support.
 
 ### Dry run
 
