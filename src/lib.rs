@@ -1,6 +1,7 @@
 pub mod cli;
 mod config;
 mod downloader;
+#[cfg(test)]
 mod installer;
 pub mod lockfile;
 mod planner;

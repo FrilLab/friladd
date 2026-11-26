@@ -146,6 +146,78 @@ fn dry_run_creates_no_project_files_and_install_is_byte_identical() {
 }
 
 #[test]
+fn managed_add_records_ownership_is_idempotent_and_refuses_local_edits() {
+    let registry = repo_path("registry/registry.json");
+    let project = tempdir().unwrap();
+    let path = project.path().display().to_string();
+    let install = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let lock_path = project.path().join("friladd.lock.json");
+    let lock_bytes = fs::read(&lock_path).unwrap();
+    let lock: serde_json::Value = serde_json::from_slice(&lock_bytes).unwrap();
+    assert_eq!(lock["schemaVersion"], 1);
+    assert_eq!(lock["items"].as_array().unwrap().len(), 1);
+    assert_eq!(lock["items"][0]["files"].as_array().unwrap().len(), 2);
+
+    let repeated = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&repeated.stdout).contains("no changes"));
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_bytes);
+
+    let target = project
+        .path()
+        .join("src/components/envelope-reveal/EnvelopeReveal.tsx");
+    fs::write(&target, b"user edit").unwrap();
+    let drifted = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(!drifted.status.success());
+    assert!(String::from_utf8_lossy(&drifted.stderr).contains("status"));
+    assert_eq!(fs::read(&target).unwrap(), b"user edit");
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_bytes);
+    fs::remove_file(&target).unwrap();
+    let missing = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("restore"));
+    assert!(!target.exists());
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_bytes);
+}
+
+#[test]
 fn project_defaults_to_the_current_working_directory() {
     let registry = repo_path("registry/registry.json");
     let project = tempdir().unwrap();

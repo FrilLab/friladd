@@ -257,7 +257,13 @@ fn cli_reads_provider_fixtures_and_verifies_sizes() {
     assert_eq!(listed.status.code(), Some(0), "{listed:?}");
     assert!(String::from_utf8_lossy(&listed.stdout).contains("triangle"));
     let add = run(&["add", "fixture/triangle"]);
-    assert_eq!(add.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&add.stderr).contains("requires managed add"));
-    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+    assert_eq!(add.status.code(), Some(0), "{add:?}");
+    assert!(project.path().join("friladd.lock.json").is_file());
+    assert!(
+        project
+            .path()
+            .join("public/models/triangle/model.glb")
+            .is_file()
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 4);
 }
