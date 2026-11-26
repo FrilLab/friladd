@@ -42,16 +42,16 @@ The final command writes two files under `/tmp/friladd-consumer/src/components/e
 ```text
 friladd --help
 friladd --version
-friladd registry add <alias> <path-or-https-url> [--global] [--default]
-friladd registry list [--global]
-friladd registry default <alias> [--global]
-friladd registry remove <alias> [--global]
-friladd registry verify [<registry-alias>] [--registry <path-or-https-url>] [--project <directory>]
-friladd list [<registry-alias>] [--registry <path-or-https-url>]
+friladd registry add <alias> <path-or-https-url> [--global | --project <directory>] [--default]
+friladd registry list [--global | --project <directory>]
+friladd registry default <alias> [--global | --project <directory>]
+friladd registry remove <alias> [--global | --project <directory>]
+friladd registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
+friladd list [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
 friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run]
 ```
 
-For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and remain subject to the existing origin checks.
+For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md) and [security model](docs/security-model.md).
 
 Examples using this repository's fixture:
 

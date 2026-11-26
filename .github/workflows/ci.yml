@@ -21,8 +21,20 @@ jobs:
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: cargo test --locked
 
+  rust-msrv:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88.0"
+      - uses: swatinem/rust-cache@v2
+        with:
+          key: msrv
+      - run: cargo test --locked
+
   native-builds:
-    needs: rust-checks
+    needs: [rust-checks, rust-msrv]
     strategy:
       fail-fast: false
       matrix:
@@ -44,6 +56,7 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
+      - run: cargo test --locked --target ${{ matrix.target }}
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Prepare target-named binary
         shell: bash

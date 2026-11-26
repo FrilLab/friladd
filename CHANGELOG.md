@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add registry verification for source and binary bytes without installing files.
+- Support explicit project scope across registry management and reject ambiguous selector or scope flags.
+- Reject reserved metadata targets and portable path collisions, and constrain HTTPS fetches to same-origin redirects with redacted errors.
+- Document the CLI, configuration and registry v1 contracts and test Rust 1.88 as the MSRV.
+
 ## 0.1.2
 
 - Exclude development and test Registry fixtures from the published npm tarball. The CLI remains provider-independent and ships no built-in components.

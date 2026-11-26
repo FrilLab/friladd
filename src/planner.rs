@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::registry::{RegistryItem, validate_relative_path};
+use crate::registry::{RegistryItem, validate_relative_path, validate_targets};
 
 #[derive(Debug)]
 pub struct PlannedFile {
@@ -42,6 +42,7 @@ pub fn build_plan(project: &Path, item: &RegistryItem) -> Result<InstallationPla
         ));
     }
 
+    validate_targets(item.files.iter().map(|file| file.target.as_str()))?;
     let mut files = Vec::with_capacity(item.files.len());
     let mut conflicts = Vec::new();
     for file in &item.files {
