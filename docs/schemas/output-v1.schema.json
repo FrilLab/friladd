@@ -5,7 +5,7 @@
   "required": ["schemaVersion", "command", "data"],
   "properties": {
     "schemaVersion": { "const": 1 },
-    "command": { "enum": ["add", "installed", "status"] },
+    "command": { "enum": ["add", "installed", "status", "update", "remove", "restore"] },
     "data": { "type": "object" }
   },
   "additionalProperties": false,
@@ -68,6 +68,26 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "command": { "enum": ["update", "remove", "restore"] }
+        }
+      },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["dryRun", "items"],
+            "properties": {
+              "dryRun": { "type": "boolean" },
+              "items": { "type": "array", "items": { "$ref": "#/$defs/mutationItem" } }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -101,6 +121,27 @@
         "action": { "enum": ["install", "unchanged"] },
         "ownerBefore": { "oneOf": [{ "$ref": "#/$defs/owner" }, { "type": "null" }] },
         "ownerAfter": { "$ref": "#/$defs/owner" }
+      },
+      "additionalProperties": false
+    },
+    "mutationItem": {
+      "type": "object",
+      "required": ["providerId", "itemId", "actions"],
+      "properties": {
+        "providerId": { "type": "string", "minLength": 1 },
+        "itemId": { "type": "string", "minLength": 1 },
+        "actions": { "type": "array", "items": { "$ref": "#/$defs/mutationAction" } }
+      },
+      "additionalProperties": false
+    },
+    "mutationAction": {
+      "type": "object",
+      "required": ["target", "action", "ownerBefore", "ownerAfter"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "action": { "enum": ["install", "replace", "unchanged", "remove", "already-missing", "restore"] },
+        "ownerBefore": { "oneOf": [{ "$ref": "#/$defs/owner" }, { "type": "null" }] },
+        "ownerAfter": { "oneOf": [{ "$ref": "#/$defs/owner" }, { "type": "null" }] }
       },
       "additionalProperties": false
     },

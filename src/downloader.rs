@@ -1,6 +1,13 @@
 use reqwest::{Certificate, Url, blocking::Client, redirect::Policy};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, fs, io::Read, path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use crate::{
     planner::InstallationPlan,
@@ -92,6 +99,76 @@ fn check_staged_bytes(lengths: impl IntoIterator<Item = u64>) -> Result<(), Stri
 pub struct AcquiredFile {
     pub bytes: Arc<[u8]>,
     pub resolved_locator: Option<String>,
+}
+
+/// Reacquire one exact lockfile locator and verify both its recorded digest and size.
+pub fn acquire_locked_file(
+    locator: &str,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<Arc<[u8]>, String> {
+    let url = Url::parse(locator).map_err(|_| "Invalid locked artifact locator")?;
+    let bytes = match url.scheme() {
+        "file" => {
+            let path = url
+                .to_file_path()
+                .map_err(|_| "Invalid locked local artifact path")?;
+            read_local_file_url(&path)?
+        }
+        "https" => {
+            fetch_url_with_policy(
+                &url,
+                MAX_FILE_BYTES,
+                "locked artifact",
+                None,
+                REQUEST_TIMEOUT,
+                false,
+            )?
+            .0
+        }
+        _ => return Err("Locked artifacts must use file or HTTPS locators".into()),
+    };
+    verify_sha256(&bytes, expected_sha256, "locked artifact")?;
+    if bytes.len() as u64 != expected_size {
+        return Err(format!(
+            "Locked artifact size mismatch: expected {expected_size}, got {}",
+            bytes.len()
+        ));
+    }
+    Ok(bytes.into())
+}
+
+fn read_local_file_url(path: &Path) -> Result<Vec<u8>, String> {
+    if !path.is_absolute() {
+        return Err("Locked local artifact path must be absolute".into());
+    }
+    let mut current = PathBuf::new();
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            std::path::Component::RootDir => current.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                return Err("Locked local artifact path contains a parent component".into());
+            }
+            std::path::Component::Normal(name) => names.push(name.to_os_string()),
+        }
+    }
+    for (index, name) in names.iter().enumerate() {
+        current.push(name);
+        let metadata = fs::symlink_metadata(&current)
+            .map_err(|error| format!("Cannot inspect locked artifact: {error}"))?;
+        if metadata.file_type().is_symlink()
+            || (index + 1 < names.len() && !metadata.is_dir())
+            || (index + 1 == names.len() && !metadata.is_file())
+        {
+            return Err("Locked local artifact path contains a symlink or non-file".into());
+        }
+    }
+    let mut file = fs::File::open(&current)
+        .map_err(|error| format!("Cannot open locked local artifact: {error}"))?;
+    read_bounded(&mut file, MAX_FILE_BYTES, "locked artifact")
 }
 
 /// Verify each unique source independently without retaining file contents.
@@ -372,6 +449,38 @@ mod tests {
         let err = check_staged_bytes(std::iter::repeat_n(MAX_FILE_BYTES as u64, 52)).unwrap_err();
         assert!(err.contains("512 MiB"));
         assert!(check_staged_bytes(std::iter::repeat_n(MAX_FILE_BYTES as u64, 51)).is_ok());
+    }
+
+    #[test]
+    fn reacquires_locked_file_locator_with_exact_hash_and_size() {
+        let directory = tempfile::tempdir().unwrap();
+        let artifact = directory.path().join("model.bin");
+        let bytes = b"\0model\xffbytes";
+        fs::write(&artifact, bytes).unwrap();
+        let locator = Url::from_file_path(fs::canonicalize(&artifact).unwrap())
+            .unwrap()
+            .to_string();
+        let digest = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let acquired = acquire_locked_file(&locator, &digest, bytes.len() as u64).unwrap();
+        assert_eq!(acquired.as_ref(), bytes);
+        assert!(acquire_locked_file(&locator, &digest, 1).is_err());
+        assert!(acquire_locked_file(&locator, &"0".repeat(64), bytes.len() as u64).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn locked_local_artifact_rejects_symlink_paths() {
+        use std::os::unix::fs::symlink;
+        let directory = tempfile::tempdir().unwrap();
+        let actual = directory.path().join("actual.bin");
+        let linked = directory.path().join("linked.bin");
+        fs::write(&actual, b"asset").unwrap();
+        symlink(&actual, &linked).unwrap();
+        let locator = Url::from_file_path(&linked).unwrap().to_string();
+        assert!(acquire_locked_file(&locator, &"0".repeat(64), 5).is_err());
     }
     use std::{
         io::{self, Cursor, Write},

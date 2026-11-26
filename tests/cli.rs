@@ -1445,3 +1445,381 @@ fn conflicting_hashes_for_a_repeated_source_fail_before_writes() {
     assert!(String::from_utf8_lossy(&install.stderr).contains("Conflicting SHA-256 digests"));
     assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
 }
+
+#[test]
+fn update_plans_replaces_additions_and_obsolete_files_in_one_transaction() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap().to_owned();
+    fs::write(provider.path().join("old.bin"), b"old").unwrap();
+    fs::write(provider.path().join("stale.bin"), b"stale").unwrap();
+    fs::write(
+        &manifest,
+        v1_manifest(&[
+            ("old.bin", "assets/changed.bin", b"old"),
+            ("stale.bin", "assets/obsolete.bin", b"stale"),
+        ]),
+    )
+    .unwrap();
+    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let lock_path = project.path().join("friladd.lock.json");
+    let lock_before = fs::read(&lock_path).unwrap();
+
+    fs::write(provider.path().join("new.bin"), b"new bytes").unwrap();
+    fs::write(provider.path().join("added.bin"), b"added bytes").unwrap();
+    fs::write(
+        &manifest,
+        v1_manifest(&[
+            ("new.bin", "assets/changed.bin", b"new bytes"),
+            ("added.bin", "assets/new.bin", b"added bytes"),
+        ]),
+    )
+    .unwrap();
+    let path = project.path().to_str().unwrap();
+    let dry_run = run_in(
+        project.path(),
+        &[
+            "update",
+            "sample",
+            "--registry",
+            &source,
+            "--project",
+            path,
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
+    assert!(dry_run.stderr.is_empty());
+    let plan: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(plan["command"], "update");
+    assert_eq!(plan["data"]["dryRun"], true);
+    let actions = &plan["data"]["items"][0]["actions"];
+    assert!(
+        actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["action"] == "replace")
+    );
+    assert!(
+        actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["action"] == "install")
+    );
+    assert!(
+        actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["action"] == "remove")
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_before);
+    assert_eq!(
+        fs::read(project.path().join("assets/changed.bin")).unwrap(),
+        b"old"
+    );
+    assert!(!project.path().join("assets/new.bin").exists());
+
+    let updated = run_in(
+        project.path(),
+        &[
+            "update",
+            "sample",
+            "--registry",
+            &source,
+            "--project",
+            path,
+            "--json",
+        ],
+    );
+    assert_eq!(updated.status.code(), Some(0), "{updated:?}");
+    let output: serde_json::Value = serde_json::from_slice(&updated.stdout).unwrap();
+    assert_eq!(output["data"]["dryRun"], false);
+    assert_eq!(
+        fs::read(project.path().join("assets/changed.bin")).unwrap(),
+        b"new bytes"
+    );
+    assert_eq!(
+        fs::read(project.path().join("assets/new.bin")).unwrap(),
+        b"added bytes"
+    );
+    assert!(!project.path().join("assets/obsolete.bin").exists());
+    let lock = friladd::lockfile::Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(lock.items[0].files.len(), 2);
+    let installed_lock = fs::read(&lock_path).unwrap();
+    let repeated = run_in(
+        project.path(),
+        &[
+            "update",
+            "sample",
+            "--registry",
+            &source,
+            "--project",
+            path,
+            "--json",
+        ],
+    );
+    assert_eq!(repeated.status.code(), Some(0), "{repeated:?}");
+    let repeated_json: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
+    assert_eq!(
+        repeated_json["data"]["items"][0]["actions"][0]["action"],
+        "unchanged"
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), installed_lock);
+}
+
+#[test]
+fn update_refuses_edits_provider_changes_and_implicit_candidate_selection() {
+    let provider = tempdir().unwrap();
+    let other = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let other_manifest = other.path().join("registry.json");
+    let source = manifest.to_str().unwrap().to_owned();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["assets/model.bin"]).to_string(),
+    )
+    .unwrap();
+    fs::write(other.path().join("source.bin"), b"asset").unwrap();
+    fs::write(
+        &other_manifest,
+        manifest_with_targets(&["assets/model.bin"]).to_string(),
+    )
+    .unwrap();
+    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let path = project.path().to_str().unwrap();
+    let no_candidate = run_in(project.path(), &["update", "sample", "--project", path]);
+    assert_eq!(no_candidate.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&no_candidate.stderr).contains("--registry"));
+
+    let changed_provider = run_in(
+        project.path(),
+        &[
+            "update",
+            "sample",
+            "--registry",
+            other_manifest.to_str().unwrap(),
+            "--project",
+            path,
+        ],
+    );
+    assert_eq!(changed_provider.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&changed_provider.stderr).contains("refusing provider switch"));
+
+    fs::write(project.path().join("assets/model.bin"), b"user edit").unwrap();
+    let before = fs::read(project.path().join("assets/model.bin")).unwrap();
+    let edited = run_in(
+        project.path(),
+        &["update", "sample", "--registry", &source, "--project", path],
+    );
+    assert_eq!(edited.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&edited.stderr).contains("was modified"));
+    assert_eq!(
+        fs::read(project.path().join("assets/model.bin")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn remove_is_transactional_and_allows_safe_missing_file_cleanup() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap().to_owned();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["assets/model.bin"]).to_string(),
+    )
+    .unwrap();
+    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let path = project.path().to_str().unwrap();
+    let lock_path = project.path().join("friladd.lock.json");
+    let lock_before = fs::read(&lock_path).unwrap();
+    let dry_run = run_in(
+        project.path(),
+        &["remove", "sample", "--project", path, "--dry-run", "--json"],
+    );
+    assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
+    let report: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(report["data"]["items"][0]["actions"][0]["action"], "remove");
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_before);
+    assert!(project.path().join("assets/model.bin").exists());
+
+    fs::write(project.path().join("assets/model.bin"), b"user edit").unwrap();
+    let edited_before = fs::read(project.path().join("assets/model.bin")).unwrap();
+    let edited = run_in(project.path(), &["remove", "sample", "--project", path]);
+    assert_eq!(edited.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&edited.stderr).contains("was modified"));
+    assert_eq!(
+        fs::read(project.path().join("assets/model.bin")).unwrap(),
+        edited_before
+    );
+
+    fs::remove_file(project.path().join("assets/model.bin")).unwrap();
+    let removed = run_in(
+        project.path(),
+        &["remove", "sample", "--project", path, "--json"],
+    );
+    assert_eq!(removed.status.code(), Some(0), "{removed:?}");
+    let report: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(
+        report["data"]["items"][0]["actions"][0]["action"],
+        "already-missing"
+    );
+    let lock = friladd::lockfile::Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    assert!(lock.items.is_empty());
+    assert!(lock.providers.is_empty());
+}
+
+#[test]
+fn restore_recreates_exact_locked_bytes_and_refuses_changed_source() {
+    use sha2::Digest;
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap().to_owned();
+    fs::write(provider.path().join("source.bin"), b"\0exact\xffbytes").unwrap();
+    let hash = format!("{:x}", sha2::Sha256::digest(b"\0exact\xffbytes"));
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schemaVersion": 1,
+            "name": "test",
+            "items": [{
+                "name": "sample", "description": "test",
+                "files": [{"source":"source.bin","target":"assets/model.bin","sha256":hash}]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let path = project.path().to_str().unwrap();
+    let lock_path = project.path().join("friladd.lock.json");
+    let lock_before = fs::read(&lock_path).unwrap();
+    fs::remove_file(project.path().join("assets/model.bin")).unwrap();
+    let dry_run = run_in(
+        project.path(),
+        &["restore", "--project", path, "--dry-run", "--json"],
+    );
+    assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
+    let report: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(
+        report["data"]["items"][0]["actions"][0]["action"],
+        "restore"
+    );
+    assert!(!project.path().join("assets/model.bin").exists());
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_before);
+
+    let restored = run_in(project.path(), &["restore", "--project", path, "--json"]);
+    assert_eq!(restored.status.code(), Some(0), "{restored:?}");
+    assert_eq!(
+        fs::read(project.path().join("assets/model.bin")).unwrap(),
+        b"\0exact\xffbytes"
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_before);
+
+    fs::write(project.path().join("assets/model.bin"), b"user edit").unwrap();
+    let edited_before = fs::read(project.path().join("assets/model.bin")).unwrap();
+    let edited = run_in(project.path(), &["restore", "--project", path]);
+    assert_eq!(edited.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&edited.stderr).contains("never overwrites edits"));
+    assert_eq!(
+        fs::read(project.path().join("assets/model.bin")).unwrap(),
+        edited_before
+    );
+
+    fs::write(project.path().join("assets/model.bin"), b"\0exact\xffbytes").unwrap();
+    fs::remove_file(project.path().join("assets/model.bin")).unwrap();
+    fs::write(provider.path().join("source.bin"), b"different bytes").unwrap();
+    let rejected = run_in(project.path(), &["restore", "--project", path]);
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SHA-256 mismatch"));
+    assert!(!project.path().join("assets/model.bin").exists());
+}
+
+#[test]
+fn update_requires_explicit_v2_downgrade_confirmation() {
+    use sha2::Digest;
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry-v2.json");
+    let source = manifest.to_str().unwrap().to_owned();
+    fs::write(provider.path().join("asset.bin"), b"v2!").unwrap();
+    let hash = format!("{:x}", sha2::Sha256::digest(b"v2!"));
+    let write_manifest = |version: &str| {
+        fs::write(
+            &manifest,
+            serde_json::json!({
+                "schemaVersion": 2,
+                "id": "org.example.assets",
+                "name": "assets",
+                "items": [{
+                    "id": "sample", "version": version, "kind": "asset",
+                    "files": [{"source":"asset.bin","target":"assets/model.bin","sha256":hash,"size":3}]
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+    };
+    write_manifest("2.0.0");
+    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    write_manifest("1.0.0");
+    let path = project.path().to_str().unwrap();
+    let denied = run_in(
+        project.path(),
+        &["update", "sample", "--registry", &source, "--project", path],
+    );
+    assert_eq!(denied.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&denied.stderr).contains("--allow-downgrade"));
+    let allowed = run_in(
+        project.path(),
+        &[
+            "update",
+            "sample",
+            "--registry",
+            &source,
+            "--project",
+            path,
+            "--allow-downgrade",
+            "--dry-run",
+            "--json",
+        ],
+    );
+    assert_eq!(allowed.status.code(), Some(0), "{allowed:?}");
+    assert_eq!(
+        fs::read(project.path().join("assets/model.bin")).unwrap(),
+        b"v2!"
+    );
+}
+
+fn v1_manifest(files: &[(&str, &str, &[u8])]) -> String {
+    use sha2::{Digest, Sha256};
+    serde_json::json!({
+        "schemaVersion": 1,
+        "name": "test",
+        "items": [{
+            "name": "sample",
+            "description": "test resource",
+            "files": files.iter().map(|(source, target, bytes)| serde_json::json!({
+                "source": source,
+                "target": target,
+                "sha256": format!("{:x}", Sha256::digest(bytes)),
+            })).collect::<Vec<_>>(),
+        }],
+    })
+    .to_string()
+}

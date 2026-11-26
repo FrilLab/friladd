@@ -6,6 +6,7 @@
 - Make identical managed adds no-ops and refuse to overwrite modified, missing, or unmanaged files; dry runs verify the transaction plan without writes.
 - Emit versioned JSON plans and results for managed adds.
 - Add offline `installed` and `status` commands with deterministic JSON and bounded integrity inspection for recorded file ownership.
+- Add transactional update, remove, and exact-source restore for managed items.
 - Add the validated lock v1 and crash-recoverable transaction foundation for upcoming managed lifecycle commands.
 - Read and verify versioned Registry v2 manifests, including file sizes, resource metadata, and exact dependency declarations.
 

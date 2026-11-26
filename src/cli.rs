@@ -34,6 +34,17 @@ enum Command {
     /// Check managed file integrity without network access.
     #[command(after_help = "Example: friladd status registry/item --project ./app --check --json")]
     Status(StatusArgs),
+    /// Update one managed item from an explicitly selected candidate registry.
+    #[command(
+        after_help = "Example: friladd update registry/item --registry ./candidate.json --project ./app --dry-run"
+    )]
+    Update(UpdateArgs),
+    /// Remove one managed item without deleting locally modified files.
+    #[command(after_help = "Example: friladd remove registry/item --project ./app --dry-run")]
+    Remove(ManagedMutationArgs),
+    /// Restore missing managed files from their exact locked sources.
+    #[command(after_help = "Example: friladd restore --project ./app --dry-run")]
+    Restore(RestoreArgs),
     /// Manage named registry sources.
     #[command(after_help = "Example: friladd registry list --global")]
     Registry {
@@ -61,6 +72,60 @@ struct StatusArgs {
     /// Return exit status 2 when drift is reported.
     #[arg(long)]
     check: bool,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct UpdateArgs {
+    /// Installed item name or registry/item selector.
+    #[arg(value_name = "ITEM")]
+    item: String,
+    /// Explicit candidate alias, local manifest path, or HTTPS manifest URL.
+    #[arg(long, value_name = "ALIAS_OR_SOURCE")]
+    registry: String,
+    /// Require this exact Registry v2 version from the selected snapshot.
+    #[arg(long, value_name = "VERSION")]
+    version: Option<String>,
+    /// Permit an explicit Registry v2 downgrade.
+    #[arg(long)]
+    allow_downgrade: bool,
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    /// Verify the transaction plan without writing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct ManagedMutationArgs {
+    /// Installed item name or registry/item selector (restore may omit it).
+    #[arg(value_name = "ITEM")]
+    item: String,
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    /// Verify the transaction plan without writing.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct RestoreArgs {
+    /// Installed item name or registry/item selector; omit to restore all.
+    #[arg(value_name = "ITEM")]
+    item: Option<String>,
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    /// Verify the transaction plan without writing.
+    #[arg(long)]
+    dry_run: bool,
     /// Emit versioned JSON output.
     #[arg(long)]
     json: bool,
@@ -155,6 +220,9 @@ pub fn run() -> Result<(), String> {
         Command::Add(a) => add(a),
         Command::Installed(a) => installed(a),
         Command::Status(a) => status(a),
+        Command::Update(a) => update(a),
+        Command::Remove(a) => remove(a),
+        Command::Restore(a) => restore(a),
         Command::Registry { command } => manage(command),
     }
 }
@@ -859,6 +927,570 @@ fn normalize_absolute_path(path: &Path) -> Option<PathBuf> {
         }
     }
     Some(normalized)
+}
+
+fn candidate_provenance(
+    loaded: &registry::LoadedRegistry,
+    declared: &str,
+) -> Result<(String, String, String), String> {
+    match &loaded.source {
+        registry::RegistrySource::Local { .. } => {
+            let path = registry::canonical_local_manifest(declared)?;
+            let locator = url::Url::from_file_path(path)
+                .map_err(|_| "Cannot represent manifest provenance as a file URL")?
+                .to_string();
+            let provider = loaded.v2.as_ref().map_or_else(
+                || lockfile::v1_provider_id(&locator),
+                |v2| Ok(format!("v2:{}", v2.id)),
+            )?;
+            Ok((provider, locator.clone(), locator))
+        }
+        registry::RegistrySource::Remote { manifest_url } => {
+            let resolved = sanitized_remote_locator(manifest_url.as_str())?.to_string();
+            let declared = sanitized_remote_locator(declared)?.to_string();
+            let provider = loaded.v2.as_ref().map_or_else(
+                || lockfile::v1_provider_id(&resolved),
+                |v2| Ok(format!("v2:{}", v2.id)),
+            )?;
+            Ok((provider, declared, resolved))
+        }
+    }
+}
+
+fn select_mutation_item<'a>(
+    lock: &'a lockfile::Lock,
+    selector: &str,
+    project: &Path,
+    global: &Path,
+) -> Result<&'a lockfile::Item, String> {
+    let matches = select_status_items(lock, Some(selector), project, global)?;
+    matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("Managed item '{selector}' is not recorded in friladd.lock.json"))
+}
+
+fn update(args: UpdateArgs) -> Result<(), String> {
+    let (project_config, global) = roots(args.project.clone())?;
+    let project_root = project_config
+        .parent()
+        .ok_or_else(|| "Project configuration path has no parent".to_string())?;
+    if !args.dry_run {
+        transaction::recover(project_root)?;
+    }
+    let snapshot = lockfile::load(project_root)?;
+    let before_lock = snapshot.lock().clone();
+    let existing =
+        select_mutation_item(&before_lock, &args.item, &project_config, &global)?.clone();
+    let candidate = args.registry.as_str();
+    let candidate_location =
+        resolver::resolve_list(Some(candidate), None, &project_config, &global)?;
+    let loaded = registry::load_registry(&candidate_location)?;
+    let (provider_id, declared_source, resolved_source) =
+        candidate_provenance(&loaded, &candidate_location)?;
+    if provider_id != existing.provider_id {
+        return Err(format!(
+            "Candidate provider {provider_id} does not match installed provider {}; refusing provider switch",
+            existing.provider_id
+        ));
+    }
+    let v2_item = if let Some(v2) = &loaded.v2 {
+        Some(v2.select(&existing.item_id, args.version.as_deref())?)
+    } else {
+        if args.version.is_some() || args.allow_downgrade {
+            return Err("--version and --allow-downgrade apply only to Registry v2 items".into());
+        }
+        None
+    };
+    if v2_item.is_some_and(|item| !item.dependencies.is_empty())
+        || !existing.dependencies.is_empty()
+    {
+        return Err("Update would change or retain unresolved dependency state; dependency-aware lifecycle is not available yet".into());
+    }
+    if let (Some(old), Some(new)) = (
+        existing.version.as_deref(),
+        v2_item.map(|item| item.version.as_str()),
+    ) && semver::Version::parse(new).map_err(|_| "Invalid candidate semantic version")?
+        < semver::Version::parse(old).map_err(|_| "Invalid installed semantic version")?
+        && !args.allow_downgrade
+    {
+        return Err(format!(
+            "Candidate version {new} is older than installed version {old}; pass --allow-downgrade to confirm"
+        ));
+    }
+    let candidate_item = loaded.registry.find(&existing.item_id).ok_or_else(|| {
+        format!(
+            "Candidate manifest does not contain item {}",
+            existing.item_id
+        )
+    })?;
+    for file in &existing.files {
+        match transaction::observe(project_root, &file.target)? {
+            transaction::Observation::Content(content) if content == file.installed => {}
+            transaction::Observation::Missing => {
+                return Err(format!(
+                    "Managed file {} is missing; restore it before updating",
+                    file.target
+                ));
+            }
+            transaction::Observation::Content(_) => {
+                return Err(format!(
+                    "Managed file {} was modified; preserve it and resolve the edit before updating",
+                    file.target
+                ));
+            }
+            transaction::Observation::Unsafe => {
+                return Err(format!(
+                    "Managed path {} is unsafe; refusing update",
+                    file.target
+                ));
+            }
+            transaction::Observation::Unreadable => {
+                return Err(format!(
+                    "Managed file {} is unreadable; refusing update",
+                    file.target
+                ));
+            }
+        }
+    }
+    let mapped_item = crate::registry::RegistryItem {
+        name: candidate_item.name.clone(),
+        description: candidate_item.description.clone(),
+        files: candidate_item
+            .files
+            .iter()
+            .map(|file| crate::registry::RegistryFile {
+                source: file.source.clone(),
+                target: existing.target_root.as_ref().map_or_else(
+                    || file.target.clone(),
+                    |root| format!("{root}/{}", file.target),
+                ),
+                sha256: file.sha256.clone(),
+            })
+            .collect(),
+    };
+    let plan = planner::build_plan(project_root, &mapped_item)?;
+    let owners = before_lock.owners();
+    for target in &plan.conflicts {
+        if !owners.get(target.as_str()).is_some_and(|(owner, _)| {
+            owner.provider_id == existing.provider_id && owner.item_id == existing.item_id
+        }) {
+            return Err(format!(
+                "Candidate target {target} conflicts with an unmanaged or separately owned file"
+            ));
+        }
+    }
+    let contents = if loaded.v2.is_some() {
+        downloader::acquire_v2_files(&loaded.source, &plan)?
+    } else {
+        downloader::acquire_files(&loaded.source, &plan)?
+    };
+    let manifest_source =
+        url::Url::parse(&resolved_source).map_err(|_| "Invalid candidate manifest provenance")?;
+    let mut candidate_files = Vec::with_capacity(plan.files.len());
+    let mut content_by_target = std::collections::BTreeMap::new();
+    for (file, acquired) in plan.files.iter().zip(&contents) {
+        let installed = lockfile::Content::of(&acquired.bytes);
+        if let Some(v2) = v2_item
+            && v2
+                .files
+                .iter()
+                .find(|entry| entry.source == file.source)
+                .is_some_and(|entry| entry.size != installed.size)
+        {
+            return Err(format!(
+                "Size mismatch for candidate source {}",
+                file.source
+            ));
+        }
+        let source_locator = match &acquired.resolved_locator {
+            Some(locator) => locator.clone(),
+            None => manifest_source
+                .join(&file.source)
+                .map_err(|_| "Invalid candidate artifact locator")?
+                .to_string(),
+        };
+        let declared_target = candidate_item
+            .files
+            .iter()
+            .find(|entry| entry.source == file.source)
+            .map(|entry| entry.target.clone())
+            .ok_or_else(|| format!("Candidate source {} has no target declaration", file.source))?;
+        candidate_files.push(lockfile::OwnedFile {
+            source: file.source.clone(),
+            resolved_source: source_locator,
+            declared_target,
+            target: file.target_display.clone(),
+            expected_sha256: installed.sha256.clone(),
+            installed: installed.clone(),
+        });
+        content_by_target.insert(file.target_display.clone(), Arc::clone(&acquired.bytes));
+    }
+    candidate_files.sort_by(|left, right| left.target.cmp(&right.target));
+    let candidate_lock_item = lockfile::Item {
+        provider_id: existing.provider_id.clone(),
+        item_id: existing.item_id.clone(),
+        version: v2_item.map(|item| item.version.clone()),
+        manifest_source: resolved_source.clone(),
+        manifest_sha256: loaded.manifest_sha256.clone(),
+        target_root: existing.target_root.clone(),
+        dependencies: Vec::new(),
+        files: candidate_files,
+    };
+    let dependents = before_lock.items.iter().any(|item| {
+        item != &existing
+            && item.dependencies.iter().any(|dependency| {
+                dependency.provider_id == existing.provider_id
+                    && dependency.item_id == existing.item_id
+            })
+    });
+    if dependents && candidate_lock_item != existing {
+        return Err("Updating this item would affect dependent resources; dependency-aware lifecycle is unavailable".into());
+    }
+    let mut next = before_lock.clone();
+    let provider = next
+        .providers
+        .iter_mut()
+        .find(|provider| provider.provider_id == existing.provider_id)
+        .ok_or("Installed item has no provider record")?;
+    provider.declared_source = declared_source;
+    provider.resolved_source = resolved_source;
+    provider.manifest_sha256 = loaded.manifest_sha256.clone();
+    let index = next
+        .items
+        .iter()
+        .position(|item| {
+            item.provider_id == existing.provider_id && item.item_id == existing.item_id
+        })
+        .ok_or("Installed item disappeared from lock snapshot")?;
+    next.items[index] = candidate_lock_item.clone();
+    let old_files: std::collections::BTreeMap<_, _> = existing
+        .files
+        .iter()
+        .map(|file| (file.target.as_str(), file))
+        .collect();
+    let new_files: std::collections::BTreeMap<_, _> = candidate_lock_item
+        .files
+        .iter()
+        .map(|file| (file.target.as_str(), file))
+        .collect();
+    let targets: std::collections::BTreeSet<_> =
+        old_files.keys().chain(new_files.keys()).copied().collect();
+    let mut edits = Vec::new();
+    let mut actions = Vec::new();
+    for target in targets {
+        let old = old_files.get(target).copied();
+        let new = new_files.get(target).copied();
+        match (old, new) {
+            (Some(old), Some(new)) if old.installed == new.installed => {
+                actions.push(json_file_action(
+                    target,
+                    "unchanged",
+                    Some(&existing),
+                    Some(&candidate_lock_item),
+                ));
+            }
+            (Some(old), Some(_new)) => {
+                edits.push(transaction::Edit {
+                    target: target.to_owned(),
+                    before: Some(old.installed.clone()),
+                    write: Some(transaction::WriteSource::Shared(Arc::clone(
+                        content_by_target
+                            .get(target)
+                            .ok_or("Missing verified candidate bytes")?,
+                    ))),
+                });
+                actions.push(json_file_action(
+                    target,
+                    "replace",
+                    Some(&existing),
+                    Some(&candidate_lock_item),
+                ));
+            }
+            (None, Some(_new)) => {
+                edits.push(transaction::Edit {
+                    target: target.to_owned(),
+                    before: None,
+                    write: Some(transaction::WriteSource::Shared(Arc::clone(
+                        content_by_target
+                            .get(target)
+                            .ok_or("Missing verified candidate bytes")?,
+                    ))),
+                });
+                actions.push(json_file_action(
+                    target,
+                    "install",
+                    None,
+                    Some(&candidate_lock_item),
+                ));
+            }
+            (Some(old), None) => {
+                edits.push(transaction::Edit {
+                    target: target.to_owned(),
+                    before: Some(old.installed.clone()),
+                    write: None,
+                });
+                actions.push(json_file_action(target, "remove", Some(&existing), None));
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+    let transaction = transaction::Plan::new(snapshot, next, edits)?;
+    transaction.check(project_root)?;
+    if args.dry_run {
+        print_mutation_result(
+            "update",
+            true,
+            vec![json_item_actions(&existing, actions)],
+            args.json,
+        );
+        return Ok(());
+    }
+    transaction::apply(project_root, transaction)?;
+    print_mutation_result(
+        "update",
+        false,
+        vec![json_item_actions(&existing, actions)],
+        args.json,
+    );
+    Ok(())
+}
+
+fn remove(args: ManagedMutationArgs) -> Result<(), String> {
+    let (project_config, global) = roots(args.project)?;
+    let project_root = project_config
+        .parent()
+        .ok_or_else(|| "Project configuration path has no parent".to_string())?;
+    if !args.dry_run {
+        transaction::recover(project_root)?;
+    }
+    let snapshot = lockfile::load(project_root)?;
+    let mut next = snapshot.lock().clone();
+    let existing = select_mutation_item(&next, &args.item, &project_config, &global)?.clone();
+    if next.items.iter().any(|item| {
+        (item.provider_id != existing.provider_id || item.item_id != existing.item_id)
+            && item.dependencies.iter().any(|dependency| {
+                dependency.provider_id == existing.provider_id
+                    && dependency.item_id == existing.item_id
+            })
+    }) {
+        return Err("Another managed item depends on this item; remove dependents first".into());
+    }
+    let index = next
+        .items
+        .iter()
+        .position(|item| {
+            item.provider_id == existing.provider_id && item.item_id == existing.item_id
+        })
+        .ok_or("Installed item disappeared from lock snapshot")?;
+    next.items.remove(index);
+    next.providers.retain(|provider| {
+        next.items
+            .iter()
+            .any(|item| item.provider_id == provider.provider_id)
+    });
+    let mut edits = Vec::new();
+    let mut actions = Vec::new();
+    for file in &existing.files {
+        match transaction::observe(project_root, &file.target)? {
+            transaction::Observation::Content(content) if content == file.installed => {
+                edits.push(transaction::Edit {
+                    target: file.target.clone(),
+                    before: Some(content),
+                    write: None,
+                });
+                actions.push(json_file_action(
+                    &file.target,
+                    "remove",
+                    Some(&existing),
+                    None,
+                ));
+            }
+            transaction::Observation::Missing => {
+                edits.push(transaction::Edit {
+                    target: file.target.clone(),
+                    before: None,
+                    write: None,
+                });
+                actions.push(json_file_action(
+                    &file.target,
+                    "already-missing",
+                    Some(&existing),
+                    None,
+                ));
+            }
+            transaction::Observation::Content(_) => {
+                return Err(format!(
+                    "Managed file {} was modified; preserve it and resolve the edit before removal",
+                    file.target
+                ));
+            }
+            transaction::Observation::Unsafe => {
+                return Err(format!(
+                    "Managed path {} is unsafe; refusing removal",
+                    file.target
+                ));
+            }
+            transaction::Observation::Unreadable => {
+                return Err(format!(
+                    "Managed file {} is unreadable; refusing removal",
+                    file.target
+                ));
+            }
+        }
+    }
+    let transaction = transaction::Plan::new(snapshot, next, edits)?;
+    transaction.check(project_root)?;
+    let result = vec![json_item_actions(&existing, actions)];
+    if args.dry_run {
+        print_mutation_result("remove", true, result, args.json);
+        return Ok(());
+    }
+    transaction::apply(project_root, transaction)?;
+    print_mutation_result("remove", false, result, args.json);
+    Ok(())
+}
+
+fn restore(args: RestoreArgs) -> Result<(), String> {
+    let (project_config, global) = roots(args.project)?;
+    let project_root = project_config
+        .parent()
+        .ok_or_else(|| "Project configuration path has no parent".to_string())?;
+    if !args.dry_run {
+        transaction::recover(project_root)?;
+    }
+    let snapshot = lockfile::load(project_root)?;
+    let before = snapshot.lock().clone();
+    let selected: Vec<_> = if let Some(selector) = args.item.as_deref() {
+        vec![select_mutation_item(&before, selector, &project_config, &global)?.clone()]
+    } else {
+        before.items.clone()
+    };
+    let mut edits = Vec::new();
+    let mut item_results = Vec::new();
+    for item in &selected {
+        let mut actions = Vec::new();
+        for file in &item.files {
+            match transaction::observe(project_root, &file.target)? {
+                transaction::Observation::Content(content) if content == file.installed => {
+                    actions.push(json_file_action(
+                        &file.target,
+                        "unchanged",
+                        Some(item),
+                        Some(item),
+                    ));
+                }
+                transaction::Observation::Missing => {
+                    let bytes = downloader::acquire_locked_file(
+                        &file.resolved_source,
+                        &file.installed.sha256,
+                        file.installed.size,
+                    )?;
+                    edits.push(transaction::Edit {
+                        target: file.target.clone(),
+                        before: None,
+                        write: Some(transaction::WriteSource::Shared(bytes)),
+                    });
+                    actions.push(json_file_action(
+                        &file.target,
+                        "restore",
+                        Some(item),
+                        Some(item),
+                    ));
+                }
+                transaction::Observation::Content(_) => {
+                    return Err(format!(
+                        "Managed file {} was modified; restore never overwrites edits",
+                        file.target
+                    ));
+                }
+                transaction::Observation::Unsafe => {
+                    return Err(format!(
+                        "Managed path {} is unsafe; refusing restore",
+                        file.target
+                    ));
+                }
+                transaction::Observation::Unreadable => {
+                    return Err(format!(
+                        "Managed file {} is unreadable; refusing restore",
+                        file.target
+                    ));
+                }
+            }
+        }
+        item_results.push(json_item_actions(item, actions));
+    }
+    let transaction = transaction::Plan::new(snapshot, before, edits)?;
+    transaction.check(project_root)?;
+    if args.dry_run {
+        print_mutation_result("restore", true, item_results, args.json);
+        return Ok(());
+    }
+    transaction::apply(project_root, transaction)?;
+    print_mutation_result("restore", false, item_results, args.json);
+    Ok(())
+}
+
+fn json_file_action(
+    target: &str,
+    action: &str,
+    owner_before: Option<&lockfile::Item>,
+    owner_after: Option<&lockfile::Item>,
+) -> serde_json::Value {
+    let owner = |item: Option<&lockfile::Item>| {
+        item.map(
+            |item| serde_json::json!({ "providerId": item.provider_id, "itemId": item.item_id }),
+        )
+    };
+    serde_json::json!({
+        "target": target,
+        "action": action,
+        "ownerBefore": owner(owner_before),
+        "ownerAfter": owner(owner_after),
+    })
+}
+
+fn json_item_actions(item: &lockfile::Item, actions: Vec<serde_json::Value>) -> serde_json::Value {
+    serde_json::json!({
+        "providerId": item.provider_id,
+        "itemId": item.item_id,
+        "actions": actions,
+    })
+}
+
+fn print_mutation_result(command: &str, dry_run: bool, items: Vec<serde_json::Value>, json: bool) {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "command": command,
+                "data": { "dryRun": dry_run, "items": items }
+            })
+        );
+        return;
+    }
+    if items.is_empty() {
+        println!("No managed files require this operation.");
+        return;
+    }
+    for item in items {
+        let provider = item["providerId"].as_str().unwrap_or_default();
+        let id = item["itemId"].as_str().unwrap_or_default();
+        println!("{command} {provider}/{id}");
+        if let Some(actions) = item["actions"].as_array() {
+            for action in actions {
+                println!(
+                    "  {} {}",
+                    action["action"].as_str().unwrap_or("unknown"),
+                    action["target"].as_str().unwrap_or("")
+                );
+            }
+        }
+    }
+    if dry_run {
+        println!("Dry run: no project files or lock records were changed.");
+    }
 }
 
 fn verify_registry(args: ListArgs) -> Result<(), String> {
