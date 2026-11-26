@@ -919,6 +919,25 @@ fn add_json_reports_dry_run_install_and_unchanged_without_human_output() {
         b"asset"
     );
 
+    let lock_before_noop = fs::read(project.path().join("friladd.lock.json")).unwrap();
+    let unchanged_dry_run = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--dry-run", "--json"],
+    );
+    assert_eq!(
+        unchanged_dry_run.status.code(),
+        Some(0),
+        "{unchanged_dry_run:?}"
+    );
+    assert!(unchanged_dry_run.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&unchanged_dry_run.stdout).unwrap();
+    assert_eq!(output["data"]["dryRun"], true);
+    assert_eq!(output["data"]["files"][0]["action"], "unchanged");
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        lock_before_noop
+    );
+
     let unchanged = run_in(
         project.path(),
         &["add", "sample", "--registry", source, "--json"],

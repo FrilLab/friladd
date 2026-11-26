@@ -357,7 +357,7 @@ fn add(args: AddArgs) -> Result<(), String> {
                         item_id,
                         v2_item,
                         &loaded.manifest_sha256,
-                        false,
+                        args.dry_run,
                         "unchanged",
                     );
                 } else {
