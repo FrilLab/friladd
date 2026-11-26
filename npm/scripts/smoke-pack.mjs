@@ -157,6 +157,35 @@ try {
     { name: 'after-switch', content: 'default-from-b', target: 'after-switch.txt' },
     { name: 'choice', content: 'choice-from-project', target: 'choice.txt' },
   ]);
+  const binaryBytes = Buffer.from([0x67, 0x6c, 0x54, 0x46, 0x00, 0xff, 0x80, 0x0d, 0x0a]);
+  const binaryRegistry = makeRegistry(path.join(tempRoot, 'binary-provider'), [
+    { name: 'binary', content: binaryBytes, target: 'assets/binary.glb' },
+  ]);
+  const binaryProject = path.join(tempRoot, 'binary-consumer');
+  fs.mkdirSync(binaryProject);
+  const verifyBinary = () =>
+    invoke(['registry', 'verify', '--registry', binaryRegistry, '--project', binaryProject]);
+  const verified = verifyBinary();
+  assert.equal(verified.status, 0, verified.stderr);
+  assert.match(verified.stdout, /Verified registry binary-provider: 1 item\(s\), 1 file\(s\)\./);
+  assert.deepEqual(fs.readdirSync(binaryProject), []);
+
+  const binaryAdd = invoke(['add', 'binary', '--registry', binaryRegistry, '--project', binaryProject]);
+  assert.equal(binaryAdd.status, 0, binaryAdd.stderr);
+  const binaryTarget = path.join(binaryProject, 'assets', 'binary.glb');
+  assert.deepEqual(fs.readFileSync(binaryTarget), binaryBytes);
+
+  const binarySource = path.join(path.dirname(binaryRegistry), 'binary.txt');
+  fs.writeFileSync(binarySource, Buffer.alloc(binaryBytes.length));
+  const changed = verifyBinary();
+  assert.equal(changed.status, 2, changed.stderr);
+  assert.match(changed.stderr, /SHA-256 mismatch/);
+  fs.unlinkSync(binarySource);
+  const missing = verifyBinary();
+  assert.equal(missing.status, 2, missing.stderr);
+  assert.match(missing.stderr, /binary\.txt/);
+  assert.deepEqual(fs.readFileSync(binaryTarget), binaryBytes);
+
   for (const [alias, manifest, isDefault] of [
     ['registry-a', registryA, true],
     ['registry-b', registryB, false],
@@ -231,6 +260,12 @@ try {
   if (remoteRegistry) {
     const remoteProject = path.join(consumer, 'remote-project');
     fs.mkdirSync(remoteProject);
+    const remoteVerify = invoke([
+      'registry', 'verify', '--registry', remoteRegistry, '--project', remoteProject,
+    ]);
+    assert.equal(remoteVerify.status, 0, remoteVerify.stderr);
+    assert.match(remoteVerify.stdout, /Verified registry /);
+    assert.deepEqual(fs.readdirSync(remoteProject), []);
     const remoteAdd = invoke([
       'add',
       'envelope-reveal',
@@ -268,9 +303,9 @@ try {
       );
     }
   }
-  const remoteResult = remoteRegistry ? ' and two-file HTTPS install' : '';
+  const remoteResult = remoteRegistry ? ', HTTPS verify and install' : '';
   console.log(
-    `npm consumer smoke test passed: help/version, argument and exit-code forwarding, and two-file local install${remoteResult}`,
+    `npm consumer smoke test passed: help/version, argument and exit-code forwarding, local install, binary verification and byte identity${remoteResult}`,
   );
 } finally {
   fs.rmSync(tempRoot, { recursive: true, force: true });
