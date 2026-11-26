@@ -44,9 +44,67 @@ fn copy_consumer_fixture(destination: &Path) {
     .unwrap();
 }
 
+fn write_lock(project: &Path, targets: &[(&str, &[u8])]) {
+    use friladd::lockfile::{Content, Item, Lock, OwnedFile, Provider, v1_provider_id};
+    use sha2::{Digest, Sha256};
+    let manifest = "https://example.invalid/registry.json";
+    let provider_id = v1_provider_id(manifest).unwrap();
+    fs::create_dir_all(project).unwrap();
+    let files = targets
+        .iter()
+        .map(|(target, bytes)| {
+            let path = project.join(target);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, bytes).unwrap();
+            let source = Path::new(target)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_owned();
+            let resolved = url::Url::parse(manifest)
+                .unwrap()
+                .join(&source)
+                .unwrap()
+                .to_string();
+            let content = Content::of(bytes);
+            OwnedFile {
+                source,
+                resolved_source: resolved,
+                declared_target: (*target).to_owned(),
+                target: (*target).to_owned(),
+                expected_sha256: content.sha256.clone(),
+                installed: content,
+            }
+        })
+        .collect();
+    let lock = Lock {
+        schema_version: 1,
+        providers: vec![Provider {
+            provider_id: provider_id.clone(),
+            declared_source: manifest.into(),
+            resolved_source: manifest.into(),
+            manifest_sha256: format!("{:x}", Sha256::digest(b"manifest")),
+        }],
+        items: vec![Item {
+            provider_id,
+            item_id: "sample".into(),
+            version: None,
+            manifest_source: manifest.into(),
+            manifest_sha256: format!("{:x}", Sha256::digest(b"manifest")),
+            target_root: None,
+            dependencies: Vec::new(),
+            files,
+        }],
+    };
+    fs::write(project.join("friladd.lock.json"), lock.encode().unwrap()).unwrap();
+}
+
 #[test]
 fn help_version_and_invalid_arguments_have_expected_exit_codes() {
     assert!(run(&["--help"]).status.success());
+    assert!(String::from_utf8_lossy(&run(&["installed", "--help"]).stdout).contains("--json"));
+    assert!(String::from_utf8_lossy(&run(&["status", "--help"]).stdout).contains("--check"));
     assert!(
         String::from_utf8_lossy(&run(&["--version"]).stdout).contains(env!("CARGO_PKG_VERSION"))
     );
@@ -61,6 +119,204 @@ fn help_version_and_invalid_arguments_have_expected_exit_codes() {
             .status
             .success()
     );
+}
+
+#[test]
+fn installed_and_status_are_offline_read_only_and_report_drift() {
+    let project = tempdir().unwrap();
+    write_lock(project.path(), &[("assets/model.bin", b"\0binary\xff")]);
+    let path = project.path().display().to_string();
+    let before_lock = fs::read(project.path().join("friladd.lock.json")).unwrap();
+    let before_file = fs::read(project.path().join("assets/model.bin")).unwrap();
+    let before_entries = fs::read_dir(project.path()).unwrap().count();
+
+    let installed = run(&["installed", "--project", &path, "--json"]);
+    assert_eq!(installed.status.code(), Some(0), "{installed:?}");
+    assert!(installed.stderr.is_empty());
+    let installed_json: serde_json::Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(installed_json["schemaVersion"], 1);
+    assert_eq!(installed_json["command"], "installed");
+    assert_eq!(installed_json["data"]["items"][0]["fileCount"], 1);
+    let installed_human = run(&["installed", "--project", &path]);
+    assert_eq!(installed_human.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&installed_human.stdout).contains("sample"));
+
+    let status = run(&["status", "--project", &path, "--json"]);
+    assert_eq!(status.status.code(), Some(0), "{status:?}");
+    let status_json: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(
+        status_json["data"]["items"][0]["files"][0]["state"],
+        "unchanged"
+    );
+    let status_human = run(&["status", "--project", &path]);
+    assert_eq!(status_human.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&status_human.stdout).contains("unchanged"));
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        before_lock
+    );
+    assert_eq!(
+        fs::read(project.path().join("assets/model.bin")).unwrap(),
+        before_file
+    );
+    assert_eq!(
+        fs::read_dir(project.path()).unwrap().count(),
+        before_entries
+    );
+    assert!(!project.path().join(".friladd").exists());
+
+    fs::write(
+        project.path().join(".friladd.json"),
+        br#"{"schemaVersion":1,"registries":{"remote":{"source":"https://example.invalid/registry.json"}}}"#,
+    )
+    .unwrap();
+    let config_bytes = fs::read(project.path().join(".friladd.json")).unwrap();
+    let aliased = run(&["status", "remote/sample", "--project", &path, "--json"]);
+    assert_eq!(aliased.status.code(), Some(0), "{aliased:?}");
+    let aliased_json: serde_json::Value = serde_json::from_slice(&aliased.stdout).unwrap();
+    assert_eq!(
+        aliased_json["data"]["items"][0]["files"][0]["state"],
+        "unchanged"
+    );
+    assert_eq!(
+        fs::read(project.path().join(".friladd.json")).unwrap(),
+        config_bytes
+    );
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        before_lock
+    );
+    assert!(!project.path().join(".friladd").exists());
+
+    fs::write(project.path().join("assets/model.bin"), b"\0binary\x00").unwrap();
+    let drift = run(&["status", "sample", "--project", &path, "--json"]);
+    assert_eq!(drift.status.code(), Some(0));
+    let drift_json: serde_json::Value = serde_json::from_slice(&drift.stdout).unwrap();
+    assert_eq!(
+        drift_json["data"]["items"][0]["files"][0]["state"],
+        "modified"
+    );
+    assert_ne!(
+        drift_json["data"]["items"][0]["files"][0]["actualSha256"],
+        drift_json["data"]["items"][0]["files"][0]["expectedSha256"]
+    );
+    let checked = run(&["status", "sample", "--project", &path, "--check", "--json"]);
+    assert_eq!(checked.status.code(), Some(2));
+    assert!(serde_json::from_slice::<serde_json::Value>(&checked.stdout).is_ok());
+    assert!(String::from_utf8_lossy(&checked.stderr).contains("drift"));
+
+    fs::remove_file(project.path().join("assets/model.bin")).unwrap();
+    let missing = run(&["status", "--project", &path, "--json"]);
+    let missing_json: serde_json::Value = serde_json::from_slice(&missing.stdout).unwrap();
+    assert_eq!(
+        missing_json["data"]["items"][0]["files"][0]["state"],
+        "missing"
+    );
+}
+
+#[test]
+fn installed_and_status_handle_empty_corrupt_and_unmanaged_queries() {
+    let project = tempdir().unwrap();
+    let path = project.path().display().to_string();
+    let empty = run(&["installed", "--project", &path, "--json"]);
+    assert_eq!(empty.status.code(), Some(0));
+    let empty_json: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert!(empty_json["data"]["items"].as_array().unwrap().is_empty());
+    let unknown = run(&["status", "not-installed", "--project", &path, "--json"]);
+    assert_eq!(unknown.status.code(), Some(0));
+    let unknown_json: serde_json::Value = serde_json::from_slice(&unknown.stdout).unwrap();
+    assert_eq!(unknown_json["data"]["items"][0]["state"], "unmanaged");
+    fs::write(project.path().join("friladd.lock.json"), b"{}").unwrap();
+    let corrupt = run(&["installed", "--project", &path, "--json"]);
+    assert_eq!(corrupt.status.code(), Some(2));
+    assert!(corrupt.stdout.is_empty());
+}
+
+#[test]
+fn unqualified_duplicate_item_ids_require_a_provider_selector() {
+    use friladd::lockfile::{Content, Item, Lock, OwnedFile, Provider, v1_provider_id};
+    use sha2::{Digest, Sha256};
+    let project = tempdir().unwrap();
+    write_lock(project.path(), &[("assets/one.bin", b"one")]);
+    let path = project.path().display().to_string();
+    let lock_path = project.path().join("friladd.lock.json");
+    let mut lock = Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    let manifest = "https://other.invalid/registry.json";
+    let provider_id = v1_provider_id(manifest).unwrap();
+    let content = Content::of(b"two");
+    fs::write(project.path().join("assets/two.bin"), b"two").unwrap();
+    lock.providers.push(Provider {
+        provider_id: provider_id.clone(),
+        declared_source: manifest.into(),
+        resolved_source: manifest.into(),
+        manifest_sha256: format!("{:x}", Sha256::digest(b"other manifest")),
+    });
+    lock.items.push(Item {
+        provider_id,
+        item_id: "sample".into(),
+        version: None,
+        manifest_source: manifest.into(),
+        manifest_sha256: format!("{:x}", Sha256::digest(b"other manifest")),
+        target_root: None,
+        dependencies: Vec::new(),
+        files: vec![OwnedFile {
+            source: "two.bin".into(),
+            resolved_source: url::Url::parse(manifest)
+                .unwrap()
+                .join("two.bin")
+                .unwrap()
+                .to_string(),
+            declared_target: "assets/two.bin".into(),
+            target: "assets/two.bin".into(),
+            expected_sha256: content.sha256.clone(),
+            installed: content,
+        }],
+    });
+    fs::write(&lock_path, lock.encode().unwrap()).unwrap();
+    let ambiguous = run(&["status", "sample", "--project", &path, "--json"]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    assert!(ambiguous.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"));
+}
+
+#[cfg(unix)]
+#[test]
+fn status_reports_symlinked_owned_paths_as_unsafe_without_following_them() {
+    use std::os::unix::fs::symlink;
+    let project = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    write_lock(project.path(), &[("assets/model.bin", b"expected")]);
+    let path = project.path().display().to_string();
+    let target = project.path().join("assets/model.bin");
+    fs::remove_file(&target).unwrap();
+    fs::write(outside.path().join("secret.bin"), b"outside secret").unwrap();
+    symlink(outside.path().join("secret.bin"), &target).unwrap();
+    let output = run(&["status", "--project", &path, "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["items"][0]["files"][0]["state"], "unsafe");
+    assert!(json["data"]["items"][0]["files"][0]["actualSha256"].is_null());
+    assert_eq!(
+        fs::read_link(target).unwrap(),
+        outside.path().join("secret.bin")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn status_reports_unreadable_owned_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let project = tempdir().unwrap();
+    write_lock(project.path(), &[("assets/locked.bin", b"private")]);
+    let path = project.path().display().to_string();
+    let target = project.path().join("assets/locked.bin");
+    let original = fs::metadata(&target).unwrap().permissions();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o0)).unwrap();
+    let output = run(&["status", "--project", &path, "--json"]);
+    fs::set_permissions(&target, original).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["items"][0]["files"][0]["state"], "unreadable");
 }
 
 #[test]

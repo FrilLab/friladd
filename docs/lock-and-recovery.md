@@ -1,6 +1,6 @@
 # Project ownership and recovery
 
-FrilAdd owns only the paths recorded through a successful managed transaction. The shared lock and transaction implementation is available to lifecycle commands. Integration with the existing CLI starts with managed add in issue #12.
+FrilAdd owns only the paths recorded through a successful managed transaction. `installed` and `status` read lock state and owned paths offline without writing project state. Lifecycle mutations use the shared lock and transaction implementation.
 
 ## Lock v1
 

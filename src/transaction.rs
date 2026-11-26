@@ -256,6 +256,49 @@ pub fn inspect(project: &Path, target: &str) -> Result<Option<Content>, String> 
     inspect_at(&lockfile::canonical_project(project)?, target)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Observation {
+    Missing,
+    Content(Content),
+    Unsafe,
+    Unreadable,
+}
+
+/// Inspect one owned target without following symlinks or changing project state.
+pub fn observe(project: &Path, target: &str) -> Result<Observation, String> {
+    registry::validate_targets([target])?;
+    let root = lockfile::canonical_project(project)?;
+    let mut current = root.clone();
+    let segments: Vec<_> = target.split('/').collect();
+    for (index, segment) in segments.iter().enumerate() {
+        current.push(segment);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                return Ok(Observation::Missing);
+            }
+            Err(_) => return Ok(Observation::Unreadable),
+        };
+        if metadata.file_type().is_symlink()
+            || (index + 1 < segments.len() && !metadata.is_dir())
+            || (index + 1 == segments.len() && !metadata.is_file())
+        {
+            return Ok(Observation::Unsafe);
+        }
+        let canonical = match fs::canonicalize(&current) {
+            Ok(path) => path,
+            Err(_) => return Ok(Observation::Unreadable),
+        };
+        if !canonical.starts_with(&root) {
+            return Ok(Observation::Unsafe);
+        }
+    }
+    match fingerprint(&current, lockfile::MAX_FILE_BYTES) {
+        Ok(content) => Ok(Observation::Content(content)),
+        Err(_) => Ok(Observation::Unreadable),
+    }
+}
+
 fn inspect_at(root: &Path, target: &str) -> Result<Option<Content>, String> {
     let path = root.join(target);
     if !validate_destination(root, Path::new(target), &path)? {

@@ -49,6 +49,8 @@ friladd registry remove <alias> [--global | --project <directory>]
 friladd registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
 friladd list [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
 friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run] [--json]
+friladd installed [--project <directory>] [--json]
+friladd status [<item-or-registry/item>] [--project <directory>] [--json] [--check]
 ```
 
 For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md), [security model](docs/security-model.md), and [lock and recovery reference](docs/lock-and-recovery.md) for managed ownership and recovery behavior.
@@ -61,6 +63,8 @@ Examples using this repository's fixture:
 friladd list --registry ./registry/registry.json
 friladd add envelope-reveal --registry ./registry/registry.json --dry-run
 friladd add envelope-reveal --registry ./registry/registry.json --project ./my-app
+friladd installed --project ./my-app
+friladd status --project ./my-app --check
 ```
 
 ### Registering registries
@@ -116,6 +120,10 @@ The installer and verifier preserve exact bytes, including binary data such as G
 ### Dry run
 
 `--dry-run` uses the same manifest parsing, destination planning, content acquisition, hash checks, and transaction preconditions as installation. It prints each planned destination and ownership effect. It creates no project directories, lock, transaction state, or cache and changes no project files. For remote registries, it may download the manifest and declared source files to check their hashes.
+
+### Managed state
+
+Successful adds record item provenance and file ownership in `friladd.lock.json` in the same recoverable transaction as the installed files. `friladd installed` lists lock records without network access. `friladd status` hashes only recorded targets and reports local drift without network access or writes. Use `--check` in automation to return exit status 2 when a file is modified, missing, unsafe, or unreadable.
 
 ## Registry manifest v1
 

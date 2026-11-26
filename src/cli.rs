@@ -3,7 +3,11 @@ use crate::{
     downloader, lockfile, planner, registry, resolver, transaction,
 };
 use clap::{Args, Parser, Subcommand};
-use std::{env, fs, path::PathBuf, sync::Arc};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -24,12 +28,42 @@ enum Command {
     /// Install one item from a registry.
     #[command(after_help = "Example: friladd add local/sample --project ./app --dry-run")]
     Add(AddArgs),
+    /// List managed resources from the project lock.
+    #[command(after_help = "Example: friladd installed --project ./app --json")]
+    Installed(InstalledArgs),
+    /// Check managed file integrity without network access.
+    #[command(after_help = "Example: friladd status registry/item --project ./app --check --json")]
+    Status(StatusArgs),
     /// Manage named registry sources.
     #[command(after_help = "Example: friladd registry list --global")]
     Registry {
         #[command(subcommand)]
         command: RegistryCommand,
     },
+}
+#[derive(Debug, Args)]
+struct InstalledArgs {
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct StatusArgs {
+    /// Item name or registry/item selector.
+    #[arg(value_name = "ITEM")]
+    item: Option<String>,
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    /// Return exit status 2 when drift is reported.
+    #[arg(long)]
+    check: bool,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, Args)]
 struct ListArgs {
@@ -119,6 +153,8 @@ pub fn run() -> Result<(), String> {
     match cli.command {
         Command::List(a) => list(a),
         Command::Add(a) => add(a),
+        Command::Installed(a) => installed(a),
+        Command::Status(a) => status(a),
         Command::Registry { command } => manage(command),
     }
 }
@@ -519,6 +555,238 @@ fn print_add_json(
         })
     );
 }
+fn installed(args: InstalledArgs) -> Result<(), String> {
+    let (project_config, _) = roots(args.project)?;
+    let project_root = project_config
+        .parent()
+        .ok_or_else(|| "Project configuration path has no parent".to_string())?;
+    let snapshot = lockfile::load(project_root)?;
+    let items = &snapshot.lock().items;
+    if args.json {
+        let data: Vec<_> = items
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "providerId": item.provider_id,
+                    "itemId": item.item_id,
+                    "version": item.version,
+                    "manifestSha256": item.manifest_sha256,
+                    "fileCount": item.files.len(),
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "command": "installed",
+                "data": { "items": data }
+            })
+        );
+        return Ok(());
+    }
+    if items.is_empty() {
+        println!("No managed items installed.");
+        return Ok(());
+    }
+    for item in items {
+        let version = item.version.as_deref().map_or_else(
+            || format!("manifest {}", item.manifest_sha256),
+            |v| format!("version {v}"),
+        );
+        println!(
+            "{}/{}\t{}\t{} file(s)",
+            item.provider_id,
+            item.item_id,
+            version,
+            item.files.len()
+        );
+    }
+    Ok(())
+}
+
+fn status(args: StatusArgs) -> Result<(), String> {
+    let (project_config, global) = roots(args.project)?;
+    let project_root = project_config
+        .parent()
+        .ok_or_else(|| "Project configuration path has no parent".to_string())?;
+    let snapshot = lockfile::load(project_root)?;
+    let lock = snapshot.lock();
+    let selected = select_status_items(lock, args.item.as_deref(), &project_config, &global)?;
+    if selected.is_empty()
+        && let Some(selector) = args.item.as_deref()
+    {
+        if args.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schemaVersion": 1,
+                    "command": "status",
+                    "data": {
+                        "items": [{ "selector": selector, "state": "unmanaged", "files": [] }],
+                        "counts": { "unmanaged": 1 }
+                    }
+                })
+            );
+        } else {
+            println!("{selector}\tunmanaged (not recorded in friladd.lock.json)");
+        }
+        if args.check {
+            return Err(format!("Item '{selector}' is not managed by this project."));
+        }
+        return Ok(());
+    }
+    let mut items = Vec::new();
+    let mut counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut drift = false;
+    for item in selected {
+        let mut files = Vec::new();
+        for file in &item.files {
+            let (state, actual) = match transaction::observe(project_root, &file.target)? {
+                transaction::Observation::Missing => ("missing", None),
+                transaction::Observation::Unsafe => ("unsafe", None),
+                transaction::Observation::Unreadable => ("unreadable", None),
+                transaction::Observation::Content(content) if content == file.installed => {
+                    ("unchanged", Some(content.sha256))
+                }
+                transaction::Observation::Content(content) => ("modified", Some(content.sha256)),
+            };
+            *counts.entry(state.to_string()).or_default() += 1;
+            drift |= state != "unchanged";
+            files.push(serde_json::json!({
+                "target": file.target,
+                "state": state,
+                "expectedSha256": file.installed.sha256,
+                "actualSha256": actual,
+            }));
+        }
+        items.push(serde_json::json!({
+            "providerId": item.provider_id,
+            "itemId": item.item_id,
+            "version": item.version,
+            "manifestSha256": item.manifest_sha256,
+            "files": files,
+        }));
+    }
+    if args.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schemaVersion": 1,
+                "command": "status",
+                "data": { "items": items, "counts": counts }
+            })
+        );
+    } else if items.is_empty() {
+        println!("No managed items to check.");
+    } else {
+        for item in &items {
+            let provider = item["providerId"].as_str().unwrap_or_default();
+            let id = item["itemId"].as_str().unwrap_or_default();
+            println!("{provider}/{id}");
+            if let Some(files) = item["files"].as_array() {
+                for file in files {
+                    println!(
+                        "  {}\t{}",
+                        file["state"].as_str().unwrap_or("unreadable"),
+                        file["target"].as_str().unwrap_or("")
+                    );
+                }
+            }
+        }
+    }
+    if args.check && drift {
+        return Err("Managed file drift detected; review the status report and use restore or update as appropriate.".into());
+    }
+    Ok(())
+}
+
+fn select_status_items<'a>(
+    lock: &'a lockfile::Lock,
+    selector: Option<&str>,
+    project: &Path,
+    global: &Path,
+) -> Result<Vec<&'a lockfile::Item>, String> {
+    let Some(selector) = selector else {
+        return Ok(lock.items.iter().collect());
+    };
+    let (provider, item_id) = match selector.split_once('/') {
+        Some((provider, item))
+            if !provider.is_empty() && !item.is_empty() && !item.contains('/') =>
+        {
+            (Some(provider), item)
+        }
+        None if !selector.is_empty() => (None, selector),
+        _ => return Err("Invalid item selector; use item or registry/item".into()),
+    };
+    let provider_ids = if let Some(provider) = provider {
+        if lock
+            .providers
+            .iter()
+            .any(|entry| entry.provider_id == provider)
+        {
+            vec![provider.to_owned()]
+        } else {
+            resolve_provider_ids(lock, provider, project, global)?
+        }
+    } else {
+        Vec::new()
+    };
+    let matches: Vec<_> = lock
+        .items
+        .iter()
+        .filter(|item| item.item_id == item_id)
+        .filter(|item| {
+            provider.is_none_or(|token| {
+                item.provider_id == token || provider_ids.iter().any(|id| id == &item.provider_id)
+            })
+        })
+        .collect();
+    if matches.len() > 1 {
+        return Err(format!(
+            "Item selector '{selector}' is ambiguous; qualify it with a registry alias or provider ID."
+        ));
+    }
+    if matches.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(matches)
+}
+
+fn resolve_provider_ids(
+    lock: &lockfile::Lock,
+    token: &str,
+    project: &Path,
+    global: &Path,
+) -> Result<Vec<String>, String> {
+    let source = match resolver::resolve_list(Some(token), None, project, global) {
+        Ok(source) => source,
+        Err(error) if error.contains("is not registered") => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let locator = if source.contains("://") {
+        url::Url::parse(&source).ok().map(|mut url| {
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        })
+    } else {
+        registry::canonical_local_manifest(&source)
+            .ok()
+            .and_then(|path| url::Url::from_file_path(path).ok())
+            .map(|url| url.to_string())
+    };
+    let Some(locator) = locator else {
+        return Ok(Vec::new());
+    };
+    Ok(lock
+        .providers
+        .iter()
+        .filter(|entry| entry.resolved_source == locator)
+        .map(|entry| entry.provider_id.clone())
+        .collect())
+}
+
 fn verify_registry(args: ListArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
     let location = resolver::resolve_list(

@@ -5,6 +5,8 @@
 - Install v1 and dependency-free v2 items as managed resources, recording ownership with the file changes through the recoverable transaction engine.
 - Make identical managed adds no-ops and refuse to overwrite modified, missing, or unmanaged files; dry runs verify the transaction plan without writes.
 - Emit versioned JSON plans and results for managed adds.
+- Add offline `installed` and `status` commands with deterministic JSON and bounded integrity inspection for recorded file ownership.
+- Add the validated lock v1 and crash-recoverable transaction foundation for upcoming managed lifecycle commands.
 - Read and verify versioned Registry v2 manifests, including file sizes, resource metadata, and exact dependency declarations.
 
 - Add registry verification for source and binary bytes without installing files.
