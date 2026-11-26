@@ -42,3 +42,5 @@ A registry is a UTF-8 JSON file. `schemaVersion` must be the integer `1`. The ro
 The manifest format is a simple source-file list, not a package format. It does not declare package-manager dependencies, run scripts, or offer version resolution. SHA-256 protects the declared content from accidental or intermediate alteration, but it does not authenticate who published the manifest.
 
 See the [Registry v1 JSON Schema](schemas/registry-v1.schema.json) and the [security model](security-model.md) for runtime checks beyond the structural schema.
+
+Registry v2 is a separate opt-in protocol with provider IDs, exact item versions, and asset metadata. [Registry v2 authoring guide](registry-v2.md)

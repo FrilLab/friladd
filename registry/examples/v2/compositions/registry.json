@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 2,
+  "id": "example.compositions",
+  "name": "composition-example",
+  "items": [
+    {
+      "id": "preview",
+      "version": "1.0.0",
+      "kind": "composition",
+      "packages": [
+        {
+          "name": "react",
+          "spec": "^19.0.0",
+          "kind": "peer"
+        },
+        {
+          "name": "remotion",
+          "spec": "^4.0.0",
+          "kind": "runtime"
+        }
+      ],
+      "files": [
+        {
+          "source": "Preview.tsx",
+          "target": "src/Preview.tsx",
+          "sha256": "5fb024b21fa7ac0f68d5303f364c708c9a7716754fc7ab9c9db077becfa12487",
+          "size": 310
+        }
+      ]
+    }
+  ]
+}

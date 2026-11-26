@@ -1,0 +1,274 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FrilAdd Registry Manifest v2",
+  "description": "The CLI additionally validates manifest byte limits, exact snapshot references, path collisions, and matching metadata for repeated sources.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "name",
+    "items"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 2
+    },
+    "id": {
+      "$ref": "#/$defs/name"
+    },
+    "name": {
+      "$ref": "#/$defs/name"
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      },
+      "maxItems": 1000
+    }
+  },
+  "$defs": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}(?![\\s\\S])"
+    },
+    "relativePath": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9._-]*[A-Za-z0-9_-]/)*[A-Za-z0-9._-]*[A-Za-z0-9_-](?![\\s\\S])",
+      "not": {
+        "pattern": "(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:[./]|(?![\\s\\S]))"
+      }
+    },
+    "targetPath": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/relativePath"
+        },
+        {
+          "not": {
+            "pattern": "(?:^|/)(?:\\.(?:[Gg][Ii][Tt]|[Hh][Gg]|[Ss][Vv][Nn]|[Jj][Jj]|[Ff][Rr][Ii][Ll][Aa][Dd][Dd](?:\\.[Jj][Ss][Oo][Nn])?)|[Ff][Rr][Ii][Ll][Aa][Dd][Dd]\\.[Ll][Oo][Cc][Kk]\\.[Jj][Ss][Oo][Nn])(?:/|(?![\\s\\S]))|(?:^|/)\\.[Ff][Rr][Ii][Ll][Aa][Dd][Dd]-"
+          }
+        }
+      ]
+    },
+    "kind": {
+      "enum": [
+        "component",
+        "asset",
+        "material",
+        "texture",
+        "image",
+        "environment",
+        "animation",
+        "composition",
+        "other"
+      ]
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][A-Za-z0-9-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][A-Za-z0-9-]*))*)?(?:\\+[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*)?(?![\\s\\S])",
+      "maxLength": 128
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "packageName": {
+      "type": "string",
+      "pattern": "^(?:@[a-z0-9][a-z0-9._-]*/)?[a-z0-9][a-z0-9._-]*(?![\\s\\S])",
+      "maxLength": 214
+    },
+    "packageSpec": {
+      "type": "string",
+      "pattern": "^[~^]?(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][A-Za-z0-9-]*)(?:\\.(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][A-Za-z0-9-]*))*)?(?:\\+[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*)?(?![\\s\\S])",
+      "maxLength": 129
+    },
+    "tag": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}(?![\\s\\S])",
+      "maxLength": 64
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "target",
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "target": {
+          "$ref": "#/$defs/targetPath"
+        },
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 104857600
+        }
+      }
+    },
+    "license": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9.+-]*(?![\\s\\S])",
+          "maxLength": 128
+        },
+        "notice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/relativePath"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "itemId",
+        "version"
+      ],
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/name"
+        },
+        "itemId": {
+          "$ref": "#/$defs/name"
+        },
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "manifestSha256": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "spec",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/packageName"
+        },
+        "spec": {
+          "$ref": "#/$defs/packageSpec"
+        },
+        "kind": {
+          "enum": [
+            "runtime",
+            "peer",
+            "dev"
+          ]
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "version",
+        "kind",
+        "files"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/name"
+        },
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "kind": {
+          "$ref": "#/$defs/kind"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/description"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/tag"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "license": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/license"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file"
+          },
+          "maxItems": 256,
+          "minItems": 1
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependency"
+          },
+          "maxItems": 256
+        },
+        "packages": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/package"
+          },
+          "maxItems": 256
+        }
+      }
+    }
+  }
+}

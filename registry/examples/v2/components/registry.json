@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "id": "example.components",
+  "name": "component-example",
+  "items": [
+    {
+      "id": "model-link",
+      "version": "1.0.0",
+      "kind": "component",
+      "description": "A component with a binary registry dependency.",
+      "dependencies": [
+        {
+          "providerId": "example.assets",
+          "itemId": "triangle",
+          "version": "1.0.0",
+          "manifestSha256": "473573aae91db38fdb2df742115dcdf698953c7695534809e1d4670690596da6"
+        }
+      ],
+      "packages": [
+        {
+          "name": "react",
+          "spec": "^19.0.0",
+          "kind": "peer"
+        }
+      ],
+      "files": [
+        {
+          "source": "ModelLink.tsx",
+          "target": "src/components/ModelLink.tsx",
+          "sha256": "393bba0be5f0379f61c93c59f4fec8a4965aa04b7a12ca49aa96e1bfaa86f937",
+          "size": 103
+        }
+      ]
+    }
+  ]
+}

@@ -2,11 +2,12 @@ use serde::Deserialize;
 use std::{collections::HashSet, fs, path::PathBuf};
 use url::Url;
 
-use crate::downloader;
+use crate::{downloader, registry_v2::RegistryV2};
+use sha2::{Digest, Sha256};
 
 pub const MAX_MANIFEST_BYTES: usize = 1024 * 1024;
-const MAX_ITEMS: usize = 1_000;
-const MAX_FILES_PER_ITEM: usize = 256;
+pub(crate) const MAX_ITEMS: usize = 1_000;
+pub(crate) const MAX_FILES_PER_ITEM: usize = 256;
 
 #[derive(Clone, Debug)]
 pub enum RegistrySource {
@@ -18,6 +19,8 @@ pub enum RegistrySource {
 pub struct LoadedRegistry {
     pub registry: Registry,
     pub source: RegistrySource,
+    pub v2: Option<RegistryV2>,
+    pub manifest_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -78,8 +81,40 @@ pub fn load_registry(location: &str) -> Result<LoadedRegistry, String> {
 
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| "Registry manifest is not valid UTF-8".to_string())?;
-    let registry = parse_registry(text)?;
-    Ok(LoadedRegistry { registry, source })
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Header {
+        schema_version: u32,
+    }
+    let header: Header = serde_json::from_str(text).map_err(|error| {
+        format!(
+            "Invalid registry manifest at line {}, column {}",
+            error.line(),
+            error.column()
+        )
+    })?;
+    let (registry, v2) = if header.schema_version == 2 {
+        if let RegistrySource::Remote { manifest_url } = &source
+            && (manifest_url.query().is_some()
+                || manifest_url.fragment().is_some()
+                || Url::parse(location)
+                    .is_ok_and(|url| url.query().is_some() || url.fragment().is_some()))
+        {
+            return Err(
+                "Registry v2 manifest locators must omit query strings and fragments".into(),
+            );
+        }
+        let v2 = RegistryV2::parse(text)?;
+        (v2.projection(), Some(v2))
+    } else {
+        (parse_registry(text)?, None)
+    };
+    Ok(LoadedRegistry {
+        registry,
+        source,
+        v2,
+        manifest_sha256: format!("{:x}", Sha256::digest(&bytes)),
+    })
 }
 
 pub fn canonical_local_manifest(location: &str) -> Result<PathBuf, String> {
@@ -262,7 +297,7 @@ fn is_windows_reserved_name(segment: &str) -> bool {
         })
 }
 
-fn validate_name(name: &str, kind: &str) -> Result<(), String> {
+pub(crate) fn validate_name(name: &str, kind: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 128 || !name.is_ascii() {
         return Err(format!(
             "Invalid {kind} name: expected 1 to 128 ASCII characters"

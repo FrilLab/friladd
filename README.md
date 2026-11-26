@@ -53,6 +53,8 @@ friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [-
 
 For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md) and [security model](docs/security-model.md). The [lock and recovery reference](docs/lock-and-recovery.md) describes the shared foundation for planned managed installs.
 
+Registry authors can use [Registry v2](docs/registry-v2.md) for versioned metadata and asset declarations. Registry v1 remains supported.
+
 Examples using this repository's fixture:
 
 ```sh
