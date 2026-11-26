@@ -37,7 +37,10 @@ fn acquire_files_with_root(
 
 /// Verify each declared file independently so registry-wide verification does not
 /// retain the complete registry in memory or require a consumer project.
-pub fn verify_registry_files(source: &RegistrySource, registry: &Registry) -> Result<usize, String> {
+pub fn verify_registry_files(
+    source: &RegistrySource,
+    registry: &Registry,
+) -> Result<usize, String> {
     let mut count = 0;
     for item in &registry.items {
         for file in &item.files {
