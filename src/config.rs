@@ -1,13 +1,14 @@
 use directories::ProjectDirs;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use std::{
     collections::BTreeMap,
-    fs,
-    io::Write,
+    fmt, fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
 pub const CONFIG_FILE: &str = ".friladd.json";
+const MAX_CONFIG_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -15,8 +16,32 @@ pub struct Config {
     pub schema_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_registry: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_registries")]
     pub registries: BTreeMap<String, RegistryEntry>,
+}
+
+fn deserialize_registries<'de, D: de::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeMap<String, RegistryEntry>, D::Error> {
+    struct UniqueRegistries;
+    impl<'de> de::Visitor<'de> for UniqueRegistries {
+        type Value = BTreeMap<String, RegistryEntry>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("an object of unique registry aliases")
+        }
+
+        fn visit_map<M: de::MapAccess<'de>>(self, mut entries: M) -> Result<Self::Value, M::Error> {
+            let mut registries = BTreeMap::new();
+            while let Some((alias, entry)) = entries.next_entry()? {
+                if registries.insert(alias, entry).is_some() {
+                    return Err(de::Error::custom("duplicate registry alias"));
+                }
+            }
+            Ok(registries)
+        }
+    }
+    deserializer.deserialize_map(UniqueRegistries)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,22 +66,19 @@ impl Scope {
 }
 
 pub fn validate_alias(alias: &str) -> Result<(), String> {
-    if alias.is_empty() || alias.len() > 128 || !alias.is_ascii() {
-        return Err(format!(
-            "Invalid registry alias '{alias}': use 1 to 128 lowercase ASCII letters, digits, '.', '_' or '-'"
-        ));
-    }
     let bytes = alias.as_bytes();
-    if !bytes[0].is_ascii_lowercase() && !bytes[0].is_ascii_digit()
-        || !bytes.iter().all(|b| {
-            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.')
+    if bytes.len() > 128
+        || !bytes
+            .first()
+            .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
         })
-        || alias == "."
-        || alias == ".."
     {
-        return Err(format!(
-            "Invalid registry alias '{alias}': use 1 to 128 lowercase ASCII letters, digits, '.', '_' or '-'"
-        ));
+        return Err(
+            "Invalid registry alias: use 1 to 128 lowercase ASCII letters, digits, '.', '_' or '-'"
+                .into(),
+        );
     }
     Ok(())
 }
@@ -84,6 +106,7 @@ pub fn validate_config(config: &Config) -> Result<(), String> {
 }
 
 pub fn load(path: &Path) -> Result<Config, String> {
+    validate_config_directory(path)?;
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -105,17 +128,48 @@ pub fn load(path: &Path) -> Result<Config, String> {
             path.display()
         ));
     }
-    let text = fs::read_to_string(path)
-        .map_err(|e| format!("Cannot read configuration {}: {e}", path.display()))?;
-    let config: Config = serde_json::from_str(&text)
+    let file = fs::File::open(path)
+        .map_err(|e| format!("Cannot open configuration {}: {e}", path.display()))?;
+    let bytes = crate::downloader::read_bounded(file, MAX_CONFIG_BYTES, "configuration")?;
+    let config: Config = serde_json::from_slice(&bytes)
         .map_err(|e| format!("Invalid configuration {}: {e}", path.display()))?;
     validate_config(&config)
         .map_err(|e| format!("Invalid configuration {}: {e}", path.display()))?;
     Ok(config)
 }
 
+fn validate_config_directory(path: &Path) -> Result<(), String> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    match fs::symlink_metadata(parent) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => Ok(()),
+        Ok(_) => Err(format!(
+            "Cannot inspect configuration: expected a non-symlink directory at {}",
+            parent.display()
+        )),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "Cannot inspect configuration directory {}: {error}",
+            parent.display()
+        )),
+    }
+}
+
 pub fn write(path: &Path, config: &Config) -> Result<(), String> {
     validate_config(config)?;
+    validate_config_directory(path)?;
+    let mut bytes = serde_json::to_vec_pretty(config)
+        .map_err(|e| format!("Cannot serialize configuration: {e}"))?;
+    bytes.push(b'\n');
+    if bytes.len() > MAX_CONFIG_BYTES {
+        return Err(format!(
+            "Configuration exceeds the {MAX_CONFIG_BYTES} byte limit"
+        ));
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
             format!(
@@ -149,9 +203,7 @@ pub fn write(path: &Path, config: &Config) -> Result<(), String> {
             parent.display()
         )
     })?;
-    serde_json::to_writer_pretty(&mut temp, config)
-        .map_err(|e| format!("Cannot serialize configuration: {e}"))?;
-    temp.write_all(b"\n")
+    temp.write_all(&bytes)
         .map_err(|e| format!("Cannot write temporary configuration: {e}"))?;
     temp.as_file()
         .sync_all()

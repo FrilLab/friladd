@@ -4,7 +4,7 @@ Thanks for helping improve FrilAdd. Contributions should keep FrilAdd independen
 
 ## Development setup
 
-Install stable Rust with Cargo (edition 2024) and Node.js 18 or newer for npm package checks.
+Install stable Rust with Cargo and Node.js 22 for npm package checks. CI also verifies Rust 1.88, the minimum supported version.
 
 ```sh
 git clone https://github.com/FrilLab/friladd.git

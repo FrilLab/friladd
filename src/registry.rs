@@ -46,7 +46,7 @@ pub struct RegistryFile {
 
 pub fn load_registry(location: &str) -> Result<LoadedRegistry, String> {
     let (bytes, source) = if location.contains("://") {
-        let url = Url::parse(location).map_err(|error| format!("Invalid registry URL: {error}"))?;
+        let url = Url::parse(location).map_err(|_| "Invalid registry URL".to_string())?;
         if url.scheme() != "https"
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -65,25 +65,10 @@ pub fn load_registry(location: &str) -> Result<LoadedRegistry, String> {
             },
         )
     } else {
-        let path = PathBuf::from(location);
-        let manifest = fs::canonicalize(&path)
-            .map_err(|error| format!("Cannot resolve registry {}: {error}", path.display()))?;
-        let metadata = fs::metadata(&manifest)
-            .map_err(|error| format!("Cannot inspect registry {}: {error}", manifest.display()))?;
-        if !metadata.is_file() {
-            return Err(format!(
-                "Registry manifest is not a regular file: {}",
-                manifest.display()
-            ));
-        }
-        if metadata.len() > MAX_MANIFEST_BYTES as u64 {
-            return Err(format!(
-                "Registry manifest exceeds the {} byte limit",
-                MAX_MANIFEST_BYTES
-            ));
-        }
-        let bytes = fs::read(&manifest)
-            .map_err(|error| format!("Cannot read registry {}: {error}", manifest.display()))?;
+        let manifest = canonical_local_manifest(location)?;
+        let file = fs::File::open(&manifest)
+            .map_err(|error| format!("Cannot open registry {}: {error}", manifest.display()))?;
+        let bytes = downloader::read_bounded(file, MAX_MANIFEST_BYTES, "registry manifest")?;
         let root = manifest
             .parent()
             .ok_or_else(|| "Registry manifest has no parent directory".to_string())?
@@ -95,6 +80,51 @@ pub fn load_registry(location: &str) -> Result<LoadedRegistry, String> {
         .map_err(|_| "Registry manifest is not valid UTF-8".to_string())?;
     let registry = parse_registry(text)?;
     Ok(LoadedRegistry { registry, source })
+}
+
+pub fn canonical_local_manifest(location: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(location);
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|error| format!("Cannot inspect registry {}: {error}", path.display()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(format!(
+            "Registry manifest must be a regular non-symlink file: {}",
+            path.display()
+        ));
+    }
+    fs::canonicalize(&path)
+        .map_err(|error| format!("Cannot resolve registry {}: {error}", path.display()))
+}
+
+pub fn display_location(location: &str) -> String {
+    if !location.contains("://") {
+        let mut printable = String::with_capacity(location.len());
+        for c in location.chars() {
+            if c.is_control() {
+                printable.extend(c.escape_default());
+            } else {
+                printable.push(c);
+            }
+        }
+        return printable;
+    }
+    url::Url::parse(location)
+        .ok()
+        .filter(|url| url.scheme() == "https" && url.host_str().is_some())
+        .map_or_else(
+            || "[invalid remote source]".into(),
+            |url| {
+                if !url.username().is_empty()
+                    || url.password().is_some()
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    format!("{}/[redacted]", url.origin().ascii_serialization())
+                } else {
+                    url.to_string()
+                }
+            },
+        )
 }
 
 pub fn parse_registry(content: &str) -> Result<Registry, String> {
@@ -140,16 +170,9 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
                 item.name
             ));
         }
-        let mut targets = HashSet::new();
+        validate_targets(item.files.iter().map(|file| file.target.as_str()))?;
         for file in &item.files {
             validate_relative_path(&file.source, "source")?;
-            let target = validate_relative_path(&file.target, "target")?;
-            if !targets.insert(target.to_ascii_lowercase()) {
-                return Err(format!(
-                    "Duplicate destination path in {}: {}",
-                    item.name, file.target
-                ));
-            }
             if file.sha256.len() != 64 || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
                 return Err(format!(
                     "Invalid SHA-256 digest for {}: expected 64 hexadecimal characters",
@@ -159,6 +182,43 @@ fn validate_registry(registry: &Registry) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+pub fn validate_targets<'a>(targets: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+    let mut sorted = Vec::new();
+    for target in targets {
+        validate_relative_path(target, "target")?;
+        if target.split('/').any(is_reserved_target_segment) {
+            return Err(format!("Reserved target path: {target}"));
+        }
+        sorted.push((target.to_ascii_lowercase(), target));
+    }
+    // Comparing by segment keeps a file adjacent to its descendants and
+    // groups paths that share a case-insensitive directory prefix.
+    sorted.sort_unstable_by(|(a, _), (b, _)| a.split('/').cmp(b.split('/')));
+    for pair in sorted.windows(2) {
+        let [(_, a), (_, b)] = pair else {
+            unreachable!()
+        };
+        let siblings = a
+            .split('/')
+            .zip(b.split('/'))
+            .find(|(left, right)| left != right);
+        if siblings.is_none_or(|(left, right)| left.eq_ignore_ascii_case(right)) {
+            return Err(format!(
+                "Duplicate destination or target path collision: {a} and {b}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_reserved_target_segment(segment: &str) -> bool {
+    let segment = segment.to_ascii_lowercase();
+    matches!(
+        segment.as_str(),
+        ".git" | ".hg" | ".svn" | ".jj" | ".friladd" | ".friladd.json" | "friladd.lock.json"
+    ) || segment.starts_with(".friladd-")
 }
 
 pub fn validate_relative_path(value: &str, field: &str) -> Result<String, String> {

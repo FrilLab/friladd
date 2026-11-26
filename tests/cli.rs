@@ -10,14 +10,13 @@ fn binary() -> &'static str {
 }
 
 fn run(args: &[&str]) -> Output {
-    Command::new(binary())
-        .args(args)
-        .output()
-        .expect("run friladd")
+    run_in(Path::new(env!("CARGO_MANIFEST_DIR")), args)
 }
 
 fn run_in(directory: &Path, args: &[&str]) -> Output {
+    let config = tempdir().unwrap();
     Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", config.path())
         .current_dir(directory)
         .args(args)
         .output()
@@ -523,4 +522,399 @@ fn registry_verify_resolves_registered_alias_and_default() {
         );
     }
     assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+}
+
+fn assert_cli_error(output: Output, message: &str) {
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(message), "{stderr}");
+}
+
+#[test]
+fn subcommand_help_and_ambiguous_flags_follow_the_contract() {
+    let root = tempdir().unwrap();
+    for command in [
+        &["list"][..],
+        &["add"],
+        &["registry"],
+        &["registry", "add"],
+        &["registry", "default"],
+        &["registry", "remove"],
+        &["registry", "list"],
+        &["registry", "verify"],
+    ] {
+        let args = [command, &["--help"]].concat();
+        let output = run_in(root.path(), &args);
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("Usage: friladd"), "{stdout}");
+        assert!(stdout.contains("Example: friladd"), "{stdout}");
+        if *command != ["registry"] {
+            assert!(stdout.contains("--project"), "{stdout}");
+        }
+    }
+    for command in [
+        &["list", "one", "--registry", "two"][..],
+        &["registry", "verify", "one", "--registry", "two"],
+        &["add", "one/thing", "--registry", "two"],
+        &["registry", "list", "--global", "--project", "."],
+    ] {
+        assert_cli_error(run_in(root.path(), command), "cannot be");
+    }
+    assert_cli_error(
+        run_in(root.path(), &["list", "--bogus"]),
+        "unexpected argument",
+    );
+    assert_cli_error(
+        run_in(root.path(), &["registry", "remove", "a", "b"]),
+        "unexpected argument",
+    );
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn explicit_project_registration_validates_paths_from_the_invocation_directory() {
+    let root = tempdir().unwrap();
+    let consumer = root.path().join("consumer");
+    let provider = root.path().join("provider");
+    fs::create_dir(&consumer).unwrap();
+    fs::create_dir(&provider).unwrap();
+    fs::write(
+        provider.join("manifest.json"),
+        r#"{"schemaVersion":1,"name":"remote-independent","items":[{"name":"z","description":"Z","files":[{"source":"missing","target":"z","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]},{"name":"a","description":"A","files":[{"source":"missing","target":"a","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}]}"#,
+    ).unwrap();
+
+    let register = run_in(
+        root.path(),
+        &[
+            "registry",
+            "add",
+            "demo",
+            "./provider/manifest.json",
+            "--project",
+            "consumer",
+        ],
+    );
+    assert_eq!(register.status.code(), Some(0), "{register:?}");
+    assert!(!root.path().join(".friladd.json").exists());
+    let config_path = consumer.join(".friladd.json");
+    let original = fs::read(&config_path).unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    assert_eq!(
+        Path::new(config["registries"]["demo"]["source"].as_str().unwrap()),
+        Path::new("..").join("provider").join("manifest.json")
+    );
+    assert_eq!(fs::read_dir(&consumer).unwrap().count(), 1);
+    let listed = run_in(root.path(), &["list", "demo", "--project", "consumer"]);
+    assert_eq!(listed.status.code(), Some(0), "{listed:?}");
+    assert_eq!(
+        String::from_utf8(listed.stdout).unwrap(),
+        "Available items (remote-independent):\n- a: A\n- z: Z\n"
+    );
+
+    assert_cli_error(
+        run_in(
+            root.path(),
+            &[
+                "registry",
+                "add",
+                "demo",
+                "./not-there",
+                "--project",
+                "consumer",
+            ],
+        ),
+        "already exists",
+    );
+    assert_eq!(fs::read(&config_path).unwrap(), original);
+    let set = run_in(
+        root.path(),
+        &["registry", "default", "demo", "--project", "consumer"],
+    );
+    assert_eq!(set.status.code(), Some(0), "{set:?}");
+    assert_cli_error(
+        run_in(
+            root.path(),
+            &["registry", "verify", "--project", "consumer"],
+        ),
+        "missing",
+    );
+
+    let removed = run_in(
+        root.path(),
+        &["registry", "remove", "demo", "--project", "consumer"],
+    );
+    assert_eq!(removed.status.code(), Some(0), "{removed:?}");
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(config_path).unwrap()).unwrap();
+    assert_eq!(
+        config,
+        serde_json::json!({"schemaVersion": 1, "registries": {}})
+    );
+    assert_cli_error(
+        run_in(root.path(), &["list", "--project", "consumer"]),
+        "No default registry",
+    );
+    assert_eq!(fs::read_dir(&consumer).unwrap().count(), 1);
+}
+
+#[test]
+fn malformed_and_ambiguous_configs_fail_without_changes() {
+    let root = tempdir().unwrap();
+    let path = root.path().join(".friladd.json");
+    for (config, expected) in [
+        ("{", "Invalid configuration"),
+        (r#"{"schemaVersion":2}"#, "Unsupported"),
+        (
+            r#"{"schemaVersion":1,"extra":true}"#,
+            "Invalid configuration",
+        ),
+        (
+            r#"{"schemaVersion":1,"defaultRegistry":"missing"}"#,
+            "is not registered",
+        ),
+        (
+            r#"{"schemaVersion":1,"registries":{"same":{"source":"one"},"same":{"source":"two"}}}"#,
+            "duplicate registry alias",
+        ),
+    ] {
+        fs::write(&path, config).unwrap();
+        assert_cli_error(run_in(root.path(), &["registry", "list"]), expected);
+        assert_eq!(fs::read(&path).unwrap(), config.as_bytes());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+    }
+    fs::write(&path, " ".repeat(1024 * 1024 + 1)).unwrap();
+    assert_cli_error(run_in(root.path(), &["registry", "list"]), "byte limit");
+    assert_eq!(fs::metadata(path).unwrap().len(), 1024 * 1024 + 1);
+}
+
+fn manifest_with_targets(targets: &[&str]) -> serde_json::Value {
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(b"asset"));
+    serde_json::json!({
+        "schemaVersion":1,
+        "name":"test",
+        "items":[{
+            "name":"sample",
+            "description":"Test asset",
+            "files":targets.iter().map(|target| serde_json::json!({
+                "source":"source.bin", "target":target, "sha256":hash
+            })).collect::<Vec<_>>()
+        }]
+    })
+}
+
+#[test]
+fn malformed_registry_and_unsafe_targets_never_write_even_during_install() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    for (targets, expected) in [
+        (&["../outside"][..], "Invalid target"),
+        (&["café/file"], "Invalid target"),
+        (&["LPT9.txt"], "Invalid target"),
+        (&["src./file"], "Invalid target"),
+        (&["src/file:stream"], "Invalid target"),
+        (&[".GIT/config"], "Reserved target"),
+        (&["src/.friladd.json"], "Reserved target"),
+        (&["friladd.lock.json"], "Reserved target"),
+        (&["src/.friladd-journal/entry"], "Reserved target"),
+        (&["src/File", "src/file"], "collision"),
+        (
+            &["src/File", "src/file-other", "src/file/child"],
+            "collision",
+        ),
+        (&["src/File/child", "src/file"], "collision"),
+        (&["src/Dir/one", "src/dir/two"], "collision"),
+    ] {
+        fs::write(&manifest, manifest_with_targets(targets).to_string()).unwrap();
+        for operation in [
+            &["add", "sample", "--registry", source][..],
+            &["add", "sample", "--registry", source, "--dry-run"],
+            &["registry", "verify", "--registry", source],
+        ] {
+            assert_cli_error(run_in(project.path(), operation), expected);
+            assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+        }
+    }
+    for (contents, expected) in [
+        ("{", "Invalid registry manifest"),
+        (
+            r#"{"schemaVersion":2,"name":"test","items":[]}"#,
+            "Unsupported",
+        ),
+        (
+            r#"{"schemaVersion":1,"name":"test","items":[],"extra":true}"#,
+            "Invalid registry manifest",
+        ),
+    ] {
+        fs::write(&manifest, contents).unwrap();
+        assert_cli_error(
+            run_in(project.path(), &["registry", "add", "demo", source]),
+            expected,
+        );
+        assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+    }
+}
+
+#[test]
+fn dry_run_requires_verified_content_and_keeps_the_project_empty() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap();
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["nested/asset", "nested/copy"]).to_string(),
+    )
+    .unwrap();
+    let check = || {
+        run_in(
+            project.path(),
+            &["add", "sample", "--registry", source, "--dry-run"],
+        )
+    };
+    let missing = check();
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("source.bin"));
+    fs::write(provider.path().join("source.bin"), b"changed").unwrap();
+    let changed = check();
+    assert_eq!(changed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&changed.stderr).contains("SHA-256 mismatch"));
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    assert_eq!(check().status.code(), Some(0));
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+    let install = run_in(project.path(), &["add", "sample", "--registry", source]);
+    assert_eq!(install.status.code(), Some(0), "{install:?}");
+    for target in ["nested/asset", "nested/copy"] {
+        assert_eq!(fs::read(project.path().join(target)).unwrap(), b"asset");
+    }
+}
+
+#[test]
+fn remote_source_diagnostics_do_not_disclose_credentials() {
+    let root = tempdir().unwrap();
+    let fixture = r#"{"schemaVersion":1,"registries":{"a":{"source":"https://username:password@example.invalid/token-path?key=private-query#fragment-secret"}}}"#;
+    fs::write(root.path().join(".friladd.json"), fixture).unwrap();
+    let list = run_in(root.path(), &["registry", "list"]);
+    assert_eq!(list.status.code(), Some(0), "{list:?}");
+    assert_eq!(
+        list.stdout,
+        b"a\thttps://example.invalid/[redacted]\tproject\n"
+    );
+    let error = run_in(root.path(), &["list", "a"]);
+    let stderr = String::from_utf8_lossy(&error.stderr);
+    for secret in [
+        "username",
+        "password",
+        "token-path",
+        "private-query",
+        "fragment-secret",
+    ] {
+        assert!(!stderr.contains(secret), "{stderr}");
+    }
+    assert_cli_error(error, "HTTPS URL without embedded credentials");
+    assert_eq!(
+        fs::read(root.path().join(".friladd.json")).unwrap(),
+        fixture.as_bytes()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symlink_config_manifest_source_and_destination() {
+    use std::os::unix::fs::symlink;
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["nested/asset"]).to_string(),
+    )
+    .unwrap();
+    let original = root.path().join("keep");
+    fs::write(&original, b"asset").unwrap();
+    symlink(&original, project.path().join(".friladd.json")).unwrap();
+    assert_cli_error(
+        run_in(project.path(), &["registry", "list"]),
+        "non-symlink file",
+    );
+
+    let project_link = root.path().join("project");
+    symlink(project.path(), &project_link).unwrap();
+    let project_link_with_slash = format!("{}/", project_link.display());
+    assert_cli_error(
+        run_in(
+            root.path(),
+            &["registry", "list", "--project", &project_link_with_slash],
+        ),
+        "non-symlink directory",
+    );
+
+    let linked_manifest = root.path().join("manifest.json");
+    symlink(&manifest, &linked_manifest).unwrap();
+    assert_cli_error(
+        run_in(
+            project.path(),
+            &["list", "--registry", linked_manifest.to_str().unwrap()],
+        ),
+        "non-symlink file",
+    );
+
+    let source = provider.path().join("source.bin");
+    symlink(&original, &source).unwrap();
+    assert_cli_error(
+        run_in(
+            project.path(),
+            &[
+                "registry",
+                "verify",
+                "--registry",
+                manifest.to_str().unwrap(),
+            ],
+        ),
+        "symlink",
+    );
+    fs::remove_file(&source).unwrap();
+    fs::write(source, b"asset").unwrap();
+
+    symlink(root.path(), project.path().join("nested")).unwrap();
+    assert_cli_error(
+        run_in(
+            project.path(),
+            &["add", "sample", "--registry", manifest.to_str().unwrap()],
+        ),
+        "symlink",
+    );
+    assert_eq!(fs::read(original).unwrap(), b"asset");
+    assert!(!root.path().join("asset").exists());
+}
+
+#[test]
+fn conflicting_hashes_for_a_repeated_source_fail_before_writes() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap();
+    let mut data = manifest_with_targets(&["assets/one", "assets/two"]);
+    data["items"][0]["files"][1]["sha256"] = serde_json::Value::String("0".repeat(64));
+    fs::write(&manifest, data.to_string()).unwrap();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+
+    assert_cli_error(
+        run_in(
+            project.path(),
+            &["registry", "verify", "--registry", source],
+        ),
+        "Conflicting SHA-256 digests",
+    );
+    let install = run_in(project.path(), &["add", "sample", "--registry", source]);
+    assert_eq!(install.status.code(), Some(2), "{install:?}");
+    assert!(String::from_utf8_lossy(&install.stderr).contains("Conflicting SHA-256 digests"));
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
 }

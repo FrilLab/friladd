@@ -9,7 +9,8 @@ use std::{env, fs, path::PathBuf};
 #[command(
     name = "friladd",
     version,
-    about = "Install selected source files from registries"
+    about = "Install selected source files from registries",
+    after_help = "Example: friladd add sample --registry ./registry.json --dry-run"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -18,10 +19,13 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// List items in a registry.
+    #[command(after_help = "Example: friladd list --registry ./registry.json")]
     List(ListArgs),
     /// Install one item from a registry.
+    #[command(after_help = "Example: friladd add local/sample --project ./app --dry-run")]
     Add(AddArgs),
     /// Manage named registry sources.
+    #[command(after_help = "Example: friladd registry list --global")]
     Registry {
         #[command(subcommand)]
         command: RegistryCommand,
@@ -30,49 +34,81 @@ enum Command {
 #[derive(Debug, Args)]
 struct ListArgs {
     /// Registry alias (or use --registry for a path or URL).
+    #[arg(conflicts_with = "registry")]
     registry_alias: Option<String>,
-    #[arg(long)]
+    /// Registered alias, local manifest path, or HTTPS manifest URL.
+    #[arg(long, value_name = "ALIAS_OR_SOURCE")]
     registry: Option<String>,
-    #[arg(long)]
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
 }
 #[derive(Debug, Args)]
 struct AddArgs {
+    /// Item name or registry/item.
+    #[arg(value_name = "ITEM")]
     component: String,
-    #[arg(long)]
+    /// Registered alias, local manifest path, or HTTPS manifest URL.
+    #[arg(long, value_name = "ALIAS_OR_SOURCE")]
     registry: Option<String>,
-    #[arg(long)]
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
+    /// Verify the installation plan and source bytes without writing.
     #[arg(long)]
     dry_run: bool,
 }
 #[derive(Debug, Subcommand)]
 enum RegistryCommand {
     /// Verify all declared source files and hashes without installing anything.
+    #[command(after_help = "Example: friladd registry verify --registry ./registry.json")]
     Verify(ListArgs),
+    /// Register and validate a manifest in the selected scope.
+    #[command(after_help = "Example: friladd registry add local ./registry.json --default")]
     Add {
         alias: String,
+        /// Local manifest path or HTTPS manifest URL.
         source: String,
-        #[arg(long)]
+        /// Use only global configuration.
+        #[arg(long, conflicts_with = "project")]
         global: bool,
+        /// Set this alias as the default in the selected scope.
         #[arg(long)]
         default: bool,
+        /// Project root (defaults to the current directory).
+        #[arg(long, value_name = "DIRECTORY")]
+        project: Option<PathBuf>,
     },
+    /// List configured registry aliases without fetching manifests.
+    #[command(after_help = "Example: friladd registry list --project ./app")]
     List {
-        #[arg(long)]
+        /// Use only global configuration.
+        #[arg(long, conflicts_with = "project")]
         global: bool,
         #[arg(long)]
         project: Option<PathBuf>,
     },
+    /// Unregister an alias from the selected scope.
+    #[command(after_help = "Example: friladd registry remove local")]
     Remove {
         alias: String,
-        #[arg(long)]
+        /// Use only global configuration.
+        #[arg(long, conflicts_with = "project")]
         global: bool,
+        /// Project root (defaults to the current directory).
+        #[arg(long, value_name = "DIRECTORY")]
+        project: Option<PathBuf>,
     },
+    /// Set the default registry in the selected scope.
+    #[command(after_help = "Example: friladd registry default local")]
     Default {
         alias: String,
-        #[arg(long)]
+        /// Use only global configuration.
+        #[arg(long, conflicts_with = "project")]
         global: bool,
+        /// Project root (defaults to the current directory).
+        #[arg(long, value_name = "DIRECTORY")]
+        project: Option<PathBuf>,
     },
 }
 pub fn run() -> Result<(), String> {
@@ -84,13 +120,37 @@ pub fn run() -> Result<(), String> {
     }
 }
 fn roots(project: Option<PathBuf>) -> Result<(PathBuf, PathBuf), String> {
+    Ok((project_config_path(project)?, config::global_path()?))
+}
+
+fn project_config_path(project: Option<PathBuf>) -> Result<PathBuf, String> {
     let root = match project {
         Some(p) => p,
         None => {
             env::current_dir().map_err(|e| format!("Cannot determine current directory: {e}"))?
         }
     };
-    let root = if root.exists() {
+    if root.as_os_str().is_empty() {
+        return Err("Project directory cannot be empty".into());
+    }
+    let root: PathBuf = root.components().collect();
+    let exists = match fs::symlink_metadata(&root) {
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => true,
+        Ok(_) => {
+            return Err(format!(
+                "Project path must be a non-symlink directory: {}",
+                root.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!(
+                "Cannot inspect project directory {}: {error}",
+                root.display()
+            ));
+        }
+    };
+    let root = if exists {
         fs::canonicalize(&root)
             .map_err(|e| format!("Cannot resolve project directory {}: {e}", root.display()))?
     } else {
@@ -112,7 +172,7 @@ fn roots(project: Option<PathBuf>) -> Result<(PathBuf, PathBuf), String> {
                 .ok_or_else(|| "Project path has no final directory name".to_string())?,
         )
     };
-    Ok((config::project_path(&root), config::global_path()?))
+    Ok(config::project_path(&root))
 }
 fn list(args: ListArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
@@ -124,7 +184,9 @@ fn list(args: ListArgs) -> Result<(), String> {
     )?;
     let loaded = registry::load_registry(&location)?;
     println!("Available items ({}):", loaded.registry.name);
-    for item in &loaded.registry.items {
+    let mut items: Vec<_> = loaded.registry.items.iter().collect();
+    items.sort_unstable_by_key(|item| &item.name);
+    for item in items {
         println!("- {}: {}", item.name, item.description);
     }
     Ok(())
@@ -141,8 +203,8 @@ fn add(args: AddArgs) -> Result<(), String> {
     let loaded = registry::load_registry(&resolution.manifest)?;
     let item = loaded
         .registry
-        .find(resolution.item.as_deref().unwrap())
-        .ok_or_else(|| format!("Component not found: {}", resolution.item.unwrap()))?;
+        .find(resolution.item)
+        .ok_or_else(|| format!("Component not found: {}", resolution.item.escape_debug()))?;
     let plan = planner::build_plan(&project_root, item)?;
     print_plan(&plan, &loaded.registry.name, item.name.as_str());
     if !plan.conflicts.is_empty() {
@@ -163,9 +225,6 @@ fn add(args: AddArgs) -> Result<(), String> {
     Ok(())
 }
 fn verify_registry(args: ListArgs) -> Result<(), String> {
-    if args.registry.is_some() && args.registry_alias.is_some() {
-        return Err("Use either a registry alias or --registry, not both".into());
-    }
     let (project, global) = roots(args.project)?;
     let location = resolver::resolve_list(
         args.registry.as_deref(),
@@ -191,40 +250,15 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
             source,
             global,
             default,
+            project,
         } => {
             config::validate_alias(&alias)?;
-            let (project, global_path) = roots(None)?;
-            let (path, scope) = if global {
-                (global_path, Scope::Global)
+            let path = config_path(global, project)?;
+            let scope = if global {
+                Scope::Global
             } else {
-                (project, Scope::Project)
+                Scope::Project
             };
-            let location = if global && !source.contains("://") {
-                let p = PathBuf::from(&source);
-                let cwd = env::current_dir()
-                    .map_err(|e| format!("Cannot determine current directory: {e}"))?;
-                cwd.join(p)
-                    .canonicalize()
-                    .map_err(|e| format!("Cannot resolve registry {}: {e}", source))?
-                    .to_string_lossy()
-                    .into_owned()
-            } else if !source.contains("://") {
-                let p = PathBuf::from(&source);
-                let cwd = env::current_dir()
-                    .map_err(|e| format!("Cannot determine current directory: {e}"))?;
-                let abs = cwd
-                    .join(p)
-                    .canonicalize()
-                    .map_err(|e| format!("Cannot resolve registry {}: {e}", source))?;
-                let root = path.parent().unwrap();
-                pathdiff::diff_paths(&abs, root)
-                    .unwrap_or(abs)
-                    .to_string_lossy()
-                    .into_owned()
-            } else {
-                source.clone()
-            };
-            registry::load_registry(&location)?;
             let mut config = config::load(&path)?;
             if config.registries.contains_key(&alias) {
                 return Err(format!(
@@ -232,6 +266,22 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
                     scope.label()
                 ));
             }
+            let location = if source.contains("://") {
+                registry::load_registry(&source)?;
+                source
+            } else {
+                let manifest = registry::canonical_local_manifest(&source)?;
+                registry::load_registry(manifest.to_str().ok_or("Registry path is not UTF-8")?)?;
+                let stored = if global {
+                    manifest
+                } else {
+                    pathdiff::diff_paths(&manifest, path.parent().unwrap()).unwrap_or(manifest)
+                };
+                stored
+                    .into_os_string()
+                    .into_string()
+                    .map_err(|_| "Registry path is not UTF-8")?
+            };
             config
                 .registries
                 .insert(alias.clone(), RegistryEntry { source: location });
@@ -267,7 +317,7 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
                     if !pc.registries.contains_key(a) {
                         println!(
                             "{a}\t{}\tglobal{}",
-                            e.source,
+                            registry::display_location(&e.source),
                             if gc.default_registry.as_deref() == Some(a) {
                                 "\tdefault"
                             } else {
@@ -279,10 +329,13 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        RegistryCommand::Remove { alias, global } => {
+        RegistryCommand::Remove {
+            alias,
+            global,
+            project,
+        } => {
             config::validate_alias(&alias)?;
-            let (pp, gp) = roots(None)?;
-            let path = if global { gp } else { pp };
+            let path = config_path(global, project)?;
             let mut c = config::load(&path)?;
             if c.registries.remove(&alias).is_none() {
                 return Err(format!(
@@ -306,10 +359,13 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
             );
             Ok(())
         }
-        RegistryCommand::Default { alias, global } => {
+        RegistryCommand::Default {
+            alias,
+            global,
+            project,
+        } => {
             config::validate_alias(&alias)?;
-            let (pp, gp) = roots(None)?;
-            let path = if global { gp } else { pp };
+            let path = config_path(global, project)?;
             let mut c = config::load(&path)?;
             if !c.registries.contains_key(&alias) {
                 return Err(format!(
@@ -327,11 +383,19 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
         }
     }
 }
+fn config_path(global: bool, project: Option<PathBuf>) -> Result<PathBuf, String> {
+    if global {
+        config::global_path()
+    } else {
+        project_config_path(project)
+    }
+}
+
 fn print_registry_entries(c: &Config, scope: &str) {
     for (a, e) in &c.registries {
         println!(
             "{a}\t{}\t{scope}{}",
-            e.source,
+            registry::display_location(&e.source),
             if c.default_registry.as_deref() == Some(a) {
                 "\tdefault"
             } else {

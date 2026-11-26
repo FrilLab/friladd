@@ -12,13 +12,13 @@ use crate::{
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-pub fn install(plan: &InstallationPlan, contents: &[Vec<u8>]) -> Result<(), String> {
+pub fn install(plan: &InstallationPlan, contents: &[impl AsRef<[u8]>]) -> Result<(), String> {
     if contents.len() != plan.files.len() {
         return Err("Internal error: content count does not match installation plan".to_string());
     }
     if contents
         .iter()
-        .any(|content| content.len() > MAX_FILE_BYTES)
+        .any(|content| content.as_ref().len() > MAX_FILE_BYTES)
     {
         return Err(format!(
             "Internal error: file content exceeds the {MAX_FILE_BYTES} byte limit"
@@ -34,7 +34,7 @@ pub fn install(plan: &InstallationPlan, contents: &[Vec<u8>]) -> Result<(), Stri
             ensure_parent_directories(&plan.project_root, &file.target, &mut created_directories)?;
         }
         for (file, content) in plan.files.iter().zip(contents) {
-            let temp = stage_file(&file.destination, content)?;
+            let temp = stage_file(&file.destination, content.as_ref())?;
             staged_files.push(temp);
         }
         for (file, staged) in plan.files.iter().zip(&staged_files) {
