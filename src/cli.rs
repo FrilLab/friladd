@@ -1368,6 +1368,8 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
     };
     let mut edits = Vec::new();
     let mut item_results = Vec::new();
+    let mut restore_bytes = 0_u64;
+    let mut acquired = std::collections::BTreeMap::new();
     for item in &selected {
         let mut actions = Vec::new();
         for file in &item.files {
@@ -1381,11 +1383,23 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
                     ));
                 }
                 transaction::Observation::Missing => {
-                    let bytes = downloader::acquire_locked_file(
-                        &file.resolved_source,
-                        &file.installed.sha256,
+                    restore_bytes = reserve_restore_bytes(restore_bytes, file.installed.size)?;
+                    let key = (
+                        file.resolved_source.clone(),
+                        file.installed.sha256.clone(),
                         file.installed.size,
-                    )?;
+                    );
+                    let bytes = if let Some(bytes) = acquired.get(&key) {
+                        Arc::clone(bytes)
+                    } else {
+                        let bytes = downloader::acquire_locked_file(
+                            &file.resolved_source,
+                            &file.installed.sha256,
+                            file.installed.size,
+                        )?;
+                        acquired.insert(key, Arc::clone(&bytes));
+                        bytes
+                    };
                     edits.push(transaction::Edit {
                         target: file.target.clone(),
                         before: None,
@@ -1429,6 +1443,16 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
     transaction::apply(project_root, transaction)?;
     print_mutation_result("restore", false, item_results, args.json);
     Ok(())
+}
+
+fn reserve_restore_bytes(current: u64, size: u64) -> Result<u64, String> {
+    let total = current
+        .checked_add(size)
+        .ok_or("Restore exceeds the transaction byte limit")?;
+    if total > transaction::MAX_OPERATION_BYTES {
+        return Err("Restore exceeds the 512 MiB transaction byte limit".into());
+    }
+    Ok(total)
 }
 
 fn json_file_action(
@@ -1716,5 +1740,15 @@ mod tests {
         )
         .unwrap();
         assert_eq!(locator.as_str(), "https://example.test/registry.json");
+    }
+
+    #[test]
+    fn restore_byte_budget_rejects_overflow_before_acquisition() {
+        assert_eq!(
+            reserve_restore_bytes(transaction::MAX_OPERATION_BYTES - 1, 1).unwrap(),
+            transaction::MAX_OPERATION_BYTES
+        );
+        assert!(reserve_restore_bytes(transaction::MAX_OPERATION_BYTES, 1).is_err());
+        assert!(reserve_restore_bytes(u64::MAX, 1).is_err());
     }
 }
