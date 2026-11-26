@@ -198,9 +198,6 @@ fn list(args: ListArgs) -> Result<(), String> {
 fn add(args: AddArgs) -> Result<(), String> {
     let (project_config, global) = roots(args.project.clone())?;
     let project_root = project_config.parent().unwrap().to_path_buf();
-    if !args.dry_run {
-        transaction::recover(&project_root)?;
-    }
     let resolution = resolver::resolve_add(
         &args.component,
         args.registry.as_deref(),
@@ -219,6 +216,9 @@ fn add(args: AddArgs) -> Result<(), String> {
         .transpose()?;
     if v2_item.is_some_and(|item| !item.dependencies.is_empty()) {
         return Err("This item declares dependencies; dependency installation is available in a later FrilAdd release.".into());
+    }
+    if !args.dry_run {
+        transaction::recover(&project_root)?;
     }
     let provider_id;
     let manifest_source = match &loaded.source {

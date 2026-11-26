@@ -79,6 +79,17 @@ fn list_and_unknown_component_work_through_cli() {
     let unknown = run(&["add", "not-here", "--registry", &registry]);
     assert!(!unknown.status.success());
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("Component not found"));
+
+    let missing_root = tempdir().unwrap();
+    let missing_project = missing_root.path().join("not-created");
+    let missing = run(&[
+        "add",
+        "unknown/sample",
+        "--project",
+        missing_project.to_str().unwrap(),
+    ]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("not registered"));
 }
 
 #[test]
