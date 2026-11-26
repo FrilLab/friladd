@@ -7,6 +7,7 @@
 - Emit versioned JSON plans and results for managed adds.
 - Add offline `installed` and `status` commands with deterministic JSON and bounded integrity inspection for recorded file ownership.
 - Add transactional update, remove, and exact-source restore for managed items.
+- Stream verified artifacts to bounded temporary staging, supporting Registry v2 files up to 100 MiB while preserving the Registry v1 10 MiB limit.
 - Add the validated lock v1 and crash-recoverable transaction foundation for upcoming managed lifecycle commands.
 - Read and verify versioned Registry v2 manifests, including file sizes, resource metadata, and exact dependency declarations.
 

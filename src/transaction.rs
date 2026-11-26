@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const MAX_OPERATION_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_OPERATION_BYTES: u64 = crate::downloader::MAX_OPERATION_BYTES;
 const MAX_EDITS: usize = 100_000;
 const MAX_JOURNAL_BYTES: usize = 32 * 1024 * 1024;
 const STATE: &str = ".friladd";

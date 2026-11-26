@@ -37,7 +37,7 @@ A registry is a UTF-8 JSON file. `schemaVersion` must be the integer `1`. The ro
 - `source` is resolved from the directory containing a local manifest, or relative to the remote manifest URL. Remote manifest source paths stay on the manifest's HTTPS origin. Sources are regular files; local symlinks are rejected.
 - `target` is resolved from the selected project root. Within each item, target paths must be unique case-insensitively, share consistent directory spelling, and have no file/directory prefix collisions. VCS and tool metadata segments are reserved at any depth. Symlink path components and non-regular existing destinations are rejected. Existing regular files are conflicts and are never overwritten.
 - `sha256` is exactly 64 hexadecimal characters. FrilAdd verifies the bytes after acquisition and before any destination directories are created.
-- Remote manifests use HTTPS only. A request follows at most four redirects and requires the original HTTPS origin throughout. Registry manifests are capped at 1 MiB; file content is capped at 10 MiB.
+- Remote manifests use HTTPS only. A request follows at most four redirects and requires the original HTTPS origin throughout. Registry manifests are capped at 1 MiB; Registry v1 file content retains the 10 MiB cap. Registry v2 has a 100 MiB per-file cap and a 512 MiB operation staging cap.
 
 The manifest format is a simple source-file list, not a package format. It does not declare package-manager dependencies, run scripts, or offer version resolution. SHA-256 protects the declared content from accidental or intermediate alteration, but it does not authenticate who published the manifest.
 
