@@ -300,6 +300,53 @@ fn qualified_status_keeps_local_lock_ownership_when_registry_is_removed() {
 }
 
 #[test]
+fn qualified_status_matches_declared_manifest_locator_without_following_redirects() {
+    use friladd::lockfile::{Lock, v1_provider_id};
+    let project = tempdir().unwrap();
+    write_lock(project.path(), &[("assets/model.bin", b"asset")]);
+    let declared = "https://registry.example.test/v1/registry.json";
+    let resolved = "https://cdn.example.test/snapshots/registry.json";
+    let lock_path = project.path().join("friladd.lock.json");
+    let mut lock = Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    let provider_id = v1_provider_id(resolved).unwrap();
+    lock.providers[0].provider_id = provider_id.clone();
+    lock.providers[0].declared_source = declared.into();
+    lock.providers[0].resolved_source = resolved.into();
+    lock.items[0].provider_id = provider_id;
+    lock.items[0].manifest_source = resolved.into();
+    lock.items[0].files[0].resolved_source = url::Url::parse(resolved)
+        .unwrap()
+        .join("source.bin")
+        .unwrap()
+        .to_string();
+    fs::write(&lock_path, lock.encode().unwrap()).unwrap();
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "registries": { "upstream": { "source": declared } }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let output = run_in(
+        project.path(),
+        &[
+            "status",
+            "upstream/sample",
+            "--project",
+            project.path().to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["data"]["items"][0]["itemId"], "sample");
+    assert_eq!(json["data"]["items"][0]["files"][0]["state"], "unchanged");
+}
+
+#[test]
 fn unqualified_duplicate_item_ids_require_a_provider_selector() {
     use friladd::lockfile::{Content, Item, Lock, OwnedFile, Provider, v1_provider_id};
     use sha2::{Digest, Sha256};

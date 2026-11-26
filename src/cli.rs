@@ -260,6 +260,7 @@ fn add(args: AddArgs) -> Result<(), String> {
         transaction::recover(&project_root)?;
     }
     let provider_id;
+    let declared_manifest_locator;
     let manifest_source = match &loaded.source {
         registry::RegistrySource::Local { .. } => {
             let path = registry::canonical_local_manifest(&resolution.manifest)?;
@@ -270,17 +271,18 @@ fn add(args: AddArgs) -> Result<(), String> {
             } else {
                 lockfile::v1_provider_id(url.as_str())?
             };
+            declared_manifest_locator = url.to_string();
             url
         }
         registry::RegistrySource::Remote { manifest_url } => {
-            let mut url = manifest_url.clone();
-            url.set_query(None);
-            url.set_fragment(None);
+            let url = sanitized_remote_locator(manifest_url.as_str())?;
+            let declared = sanitized_remote_locator(&resolution.manifest)?;
             if let Some(v2) = &loaded.v2 {
                 provider_id = format!("v2:{}", v2.id);
             } else {
                 provider_id = lockfile::v1_provider_id(url.as_str())?;
             }
+            declared_manifest_locator = declared.to_string();
             url
         }
     };
@@ -342,7 +344,7 @@ fn add(args: AddArgs) -> Result<(), String> {
     if !next.providers.iter().any(|p| p.provider_id == provider_id) {
         next.providers.push(lockfile::Provider {
             provider_id: provider_id.clone(),
-            declared_source: manifest_locator.clone(),
+            declared_source: declared_manifest_locator,
             resolved_source: manifest_locator.clone(),
             manifest_sha256: manifest_digest.clone(),
         });
@@ -765,11 +767,9 @@ fn resolve_provider_ids(
         Err(error) => return Err(error),
     };
     let locator = if source.contains("://") {
-        url::Url::parse(&source).ok().map(|mut url| {
-            url.set_query(None);
-            url.set_fragment(None);
-            url.to_string()
-        })
+        sanitized_remote_locator(&source)
+            .ok()
+            .map(|url| url.to_string())
     } else {
         local_manifest_locator(&source)
     };
@@ -779,9 +779,23 @@ fn resolve_provider_ids(
     Ok(lock
         .providers
         .iter()
-        .filter(|entry| entry.resolved_source == locator)
+        .filter(|entry| entry.declared_source == locator || entry.resolved_source == locator)
         .map(|entry| entry.provider_id.clone())
         .collect())
+}
+
+fn sanitized_remote_locator(source: &str) -> Result<url::Url, String> {
+    let mut url = url::Url::parse(source).map_err(|_| "Invalid remote manifest locator")?;
+    if url.scheme() != "https" {
+        return Err("Remote manifest locator must use HTTPS".into());
+    }
+    url.set_username("")
+        .map_err(|_| "Invalid remote manifest locator")?;
+    url.set_password(None)
+        .map_err(|_| "Invalid remote manifest locator")?;
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(url)
 }
 
 fn local_manifest_locator(source: &str) -> Option<String> {
@@ -1061,5 +1075,14 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(version.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn remote_manifest_provenance_removes_credentials_and_suffixes() {
+        let locator = sanitized_remote_locator(
+            "https://user:secret@example.test/registry.json?token=hidden#fragment",
+        )
+        .unwrap();
+        assert_eq!(locator.as_str(), "https://example.test/registry.json");
     }
 }
