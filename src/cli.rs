@@ -48,6 +48,8 @@ struct AddArgs {
 }
 #[derive(Debug, Subcommand)]
 enum RegistryCommand {
+    /// Verify all declared source files and hashes without installing anything.
+    Verify(ListArgs),
     Add {
         alias: String,
         source: String,
@@ -160,8 +162,30 @@ fn add(args: AddArgs) -> Result<(), String> {
     }
     Ok(())
 }
+fn verify_registry(args: ListArgs) -> Result<(), String> {
+    if args.registry.is_some() && args.registry_alias.is_some() {
+        return Err("Use either a registry alias or --registry, not both".into());
+    }
+    let (project, global) = roots(args.project)?;
+    let location = resolver::resolve_list(
+        args.registry.as_deref(),
+        args.registry_alias.as_deref(),
+        &project,
+        &global,
+    )?;
+    let loaded = registry::load_registry(&location)?;
+    let count = downloader::verify_registry_files(&loaded.source, &loaded.registry)?;
+    println!(
+        "Verified registry {}: {} item(s), {} file(s).",
+        loaded.registry.name,
+        loaded.registry.items.len(),
+        count
+    );
+    Ok(())
+}
 fn manage(command: RegistryCommand) -> Result<(), String> {
     match command {
+        RegistryCommand::Verify(args) => verify_registry(args),
         RegistryCommand::Add {
             alias,
             source,

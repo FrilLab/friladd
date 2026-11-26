@@ -423,3 +423,104 @@ fn registry_list_global_ignores_corrupt_project_config_and_marks_scope() {
     );
     assert!(String::from_utf8_lossy(&listed.stdout).contains("\tglobal"));
 }
+
+#[test]
+fn registry_verify_and_add_preserve_binary_assets_and_detect_tampering() {
+    use sha2::{Digest, Sha256};
+
+    let root = tempdir().unwrap();
+    let provider = root.path().join("provider");
+    let consumer = root.path().join("consumer");
+    fs::create_dir(&provider).unwrap();
+    fs::create_dir(&consumer).unwrap();
+    // Opaque binary bytes (not a renderable model) test the transport contract.
+    let bytes = b"glTF\x00\xff\x80\r\n";
+    let hash = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    fs::write(provider.join("model.glb"), bytes).unwrap();
+    fs::write(
+        provider.join("registry.json"),
+        serde_json::json!({
+            "schemaVersion": 1,
+            "name": "assets",
+            "items": [{
+                "name": "model",
+                "description": "Binary fixture",
+                "files": [{
+                    "source": "model.glb",
+                    "target": "public/assets/model.glb",
+                    "sha256": hash
+                }]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let manifest = provider.join("registry.json");
+    let manifest = manifest.to_str().unwrap();
+    let verified = run_in(&consumer, &["registry", "verify", "--registry", manifest]);
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&verified.stdout)
+            .contains("Verified registry assets: 1 item(s), 1 file(s).")
+    );
+    assert_eq!(fs::read_dir(&consumer).unwrap().count(), 0);
+
+    let added = run_in(&consumer, &["add", "model", "--registry", manifest]);
+    assert!(
+        added.status.success(),
+        "{}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    assert_eq!(
+        fs::read(consumer.join("public/assets/model.glb")).unwrap(),
+        bytes
+    );
+
+    fs::write(provider.join("model.glb"), b"tampered").unwrap();
+    let rejected = run_in(&consumer, &["registry", "verify", "--registry", manifest]);
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SHA-256 mismatch"));
+    fs::remove_file(provider.join("model.glb")).unwrap();
+    let missing = run_in(&consumer, &["registry", "verify", "--registry", manifest]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("model.glb"));
+    assert_eq!(
+        fs::read(consumer.join("public/assets/model.glb")).unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn registry_verify_resolves_registered_alias_and_default() {
+    let project = tempdir().unwrap();
+    let manifest = repo_path("registry/registry.json");
+    let registered = run_in(
+        project.path(),
+        &["registry", "add", "fixture", &manifest, "--default"],
+    );
+    assert!(
+        registered.status.success(),
+        "{}",
+        String::from_utf8_lossy(&registered.stderr)
+    );
+    for args in [
+        vec!["registry", "verify"],
+        vec!["registry", "verify", "fixture"],
+    ] {
+        let verified = run_in(project.path(), &args);
+        assert!(
+            verified.status.success(),
+            "{}",
+            String::from_utf8_lossy(&verified.stderr)
+        );
+    }
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 1);
+}

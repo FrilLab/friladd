@@ -1,7 +1,4 @@
-use crate::{
-    config::{self, Config},
-    registry,
-};
+use crate::config::{self, Config};
 use std::path::{Path, PathBuf};
 
 fn registered_alias_location(location: &str) -> bool {
@@ -65,13 +62,11 @@ pub fn resolve_add(
                 ));
             };
             let manifest = source_for(config, location, path)?;
-            registry::validate_registry_location(&manifest)?;
             return Ok(Resolution {
                 manifest,
                 item: Some(item.into()),
             });
         }
-        registry::validate_registry_location(location)?;
         return Ok(Resolution {
             manifest: location.into(),
             item: Some(item.into()),
@@ -99,7 +94,6 @@ pub fn resolve_add(
         return Err("No default registry is configured.\n\nRegister a project registry:\n  friladd registry add <name> <url> --default\n\nOr register one globally:\n  friladd registry add <name> <url> --global --default".into());
     };
     let manifest = source_for(config, alias, path)?;
-    registry::validate_registry_location(&manifest)?;
     Ok(Resolution {
         manifest,
         item: Some(item.into()),
@@ -123,10 +117,8 @@ pub fn resolve_list(
                 return Err(format!("Registry alias '{location}' is not registered"));
             };
             let manifest = source_for(config, location, path)?;
-            registry::validate_registry_location(&manifest)?;
             return Ok(manifest);
         }
-        registry::validate_registry_location(location)?;
         return Ok(location.into());
     }
     let pc = config::load(project)?;
@@ -135,24 +127,20 @@ pub fn resolve_list(
         config::validate_alias(alias)?;
         if pc.registries.contains_key(alias) {
             let s = source_for(&pc, alias, project)?;
-            registry::validate_registry_location(&s)?;
             return Ok(s);
         }
         if gc.registries.contains_key(alias) {
             let s = source_for(&gc, alias, global)?;
-            registry::validate_registry_location(&s)?;
             return Ok(s);
         }
         return Err(format!("Registry alias '{alias}' is not registered"));
     }
     if let Some(alias) = pc.default_registry.as_deref() {
         let s = source_for(&pc, alias, project)?;
-        registry::validate_registry_location(&s)?;
         return Ok(s);
     }
     if let Some(alias) = gc.default_registry.as_deref() {
         let s = source_for(&gc, alias, global)?;
-        registry::validate_registry_location(&s)?;
         return Ok(s);
     }
     Err("No default registry is configured. Use 'friladd registry list' to inspect registered registries.".into())

@@ -4,7 +4,7 @@ use std::{fs, io::Read, path::Path, time::Duration};
 
 use crate::{
     planner::InstallationPlan,
-    registry::{RegistrySource, validate_relative_path},
+    registry::{Registry, RegistrySource, validate_relative_path},
 };
 
 pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -25,35 +25,65 @@ fn acquire_files_with_root(
 ) -> Result<Vec<Vec<u8>>, String> {
     let mut contents = Vec::with_capacity(plan.files.len());
     for file in &plan.files {
-        let bytes = match source {
-            RegistrySource::Local { root } => read_local_source(root, &file.source)?,
-            RegistrySource::Remote { manifest_url } => {
-                let source_path = validate_relative_path(&file.source, "source")?;
-                let url = manifest_url
-                    .join(&source_path)
-                    .map_err(|error| format!("Invalid source URL for {}: {error}", file.source))?;
-                if url.scheme() != "https"
-                    || url.host_str() != manifest_url.host_str()
-                    || url.port_or_known_default() != manifest_url.port_or_known_default()
-                {
-                    return Err(format!(
-                        "Registry source escaped its HTTPS origin: {}",
-                        file.source
-                    ));
-                }
-                fetch_url_with_root(
-                    &url,
-                    MAX_FILE_BYTES,
-                    &format!("file {}", file.source),
-                    test_root.clone(),
-                )?
-                .0
-            }
-        };
-        verify_sha256(&bytes, &file.expected_sha256, &file.source)?;
-        contents.push(bytes);
+        contents.push(acquire_file(
+            source,
+            &file.source,
+            &file.expected_sha256,
+            test_root.clone(),
+        )?);
     }
     Ok(contents)
+}
+
+/// Verify each declared file independently so registry-wide verification does not
+/// retain the complete registry in memory or require a consumer project.
+pub fn verify_registry_files(
+    source: &RegistrySource,
+    registry: &Registry,
+) -> Result<usize, String> {
+    let mut count = 0;
+    for item in &registry.items {
+        for file in &item.files {
+            acquire_file(source, &file.source, &file.sha256, None)
+                .map_err(|error| format!("Item {}: {error}", item.name))?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn acquire_file(
+    source: &RegistrySource,
+    file_source: &str,
+    expected_sha256: &str,
+    test_root: Option<Certificate>,
+) -> Result<Vec<u8>, String> {
+    let bytes = match source {
+        RegistrySource::Local { root } => read_local_source(root, file_source)?,
+        RegistrySource::Remote { manifest_url } => {
+            let source_path = validate_relative_path(file_source, "source")?;
+            let url = manifest_url
+                .join(&source_path)
+                .map_err(|error| format!("Invalid source URL for {file_source}: {error}"))?;
+            if url.scheme() != "https"
+                || url.host_str() != manifest_url.host_str()
+                || url.port_or_known_default() != manifest_url.port_or_known_default()
+            {
+                return Err(format!(
+                    "Registry source escaped its HTTPS origin: {file_source}"
+                ));
+            }
+            fetch_url_with_root(
+                &url,
+                MAX_FILE_BYTES,
+                &format!("file {file_source}"),
+                test_root,
+            )?
+            .0
+        }
+    };
+    verify_sha256(&bytes, expected_sha256, file_source)?;
+    Ok(bytes)
 }
 
 fn read_local_source(root: &Path, source: &str) -> Result<Vec<u8>, String> {
