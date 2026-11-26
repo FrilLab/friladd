@@ -57,6 +57,9 @@ struct AddArgs {
     /// Verify the installation plan and source bytes without writing.
     #[arg(long)]
     dry_run: bool,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, Subcommand)]
 enum RegistryCommand {
@@ -346,7 +349,19 @@ fn add(args: AddArgs) -> Result<(), String> {
                     == Some(&file.installed)
             });
             if unchanged {
-                println!("Already installed {} (no changes).", item.name);
+                if args.json {
+                    print_add_json(
+                        &plan,
+                        &provider_id,
+                        item_id,
+                        v2_item,
+                        &loaded.manifest_sha256,
+                        false,
+                        "unchanged",
+                    );
+                } else {
+                    println!("Already installed {} (no changes).", item.name);
+                }
                 return Ok(());
             }
         }
@@ -366,7 +381,9 @@ fn add(args: AddArgs) -> Result<(), String> {
             ));
         }
     }
-    print_plan(&plan, &loaded.registry.name, item.name.as_str());
+    if !args.json {
+        print_plan(&plan, &loaded.registry.name, item.name.as_str());
+    }
     if !plan.conflicts.is_empty() {
         return Err(format!(
             "{} destination file(s) are already present and are not owned by this item",
@@ -411,20 +428,85 @@ fn add(args: AddArgs) -> Result<(), String> {
     }
     let transaction = transaction::Plan::new(before, next, edits)?;
     transaction.check(&project_root)?;
-    for file in &plan.files {
-        println!("Will install {}", file.target_display);
-    }
     if args.dry_run {
-        println!(
-            "Dry run: no project files were changed. Ownership would be recorded in friladd.lock.json."
-        );
+        if args.json {
+            print_add_json(
+                &plan,
+                &provider_id,
+                item_id,
+                v2_item,
+                &loaded.manifest_sha256,
+                true,
+                "install",
+            );
+        } else {
+            for file in &plan.files {
+                println!("Will install {}", file.target_display);
+            }
+            println!(
+                "Dry run: no project files were changed. Ownership would be recorded in friladd.lock.json."
+            );
+        }
         return Ok(());
     }
     transaction::apply(&project_root, transaction)?;
-    for file in &plan.files {
-        println!("Installed {}", file.target_display);
+    if args.json {
+        print_add_json(
+            &plan,
+            &provider_id,
+            item_id,
+            v2_item,
+            &loaded.manifest_sha256,
+            false,
+            "install",
+        );
+    } else {
+        for file in &plan.files {
+            println!("Installed {}", file.target_display);
+        }
     }
     Ok(())
+}
+
+fn print_add_json(
+    plan: &planner::InstallationPlan,
+    provider_id: &str,
+    item_id: &str,
+    v2_item: Option<&crate::registry_v2::Item>,
+    manifest_sha256: &str,
+    dry_run: bool,
+    action: &str,
+) {
+    let mut files: Vec<_> = plan
+        .files
+        .iter()
+        .map(|file| {
+            serde_json::json!({
+                "target": file.target_display,
+                "action": action,
+                "ownerBefore": if action == "unchanged" { Some(serde_json::json!({ "providerId": provider_id, "itemId": item_id })) } else { None },
+                "ownerAfter": { "providerId": provider_id, "itemId": item_id },
+            })
+        })
+        .collect();
+    files.sort_by(|a, b| a["target"].as_str().cmp(&b["target"].as_str()));
+    println!(
+        "{}",
+        serde_json::json!({
+            "schemaVersion": 1,
+            "command": "add",
+            "data": {
+                "dryRun": dry_run,
+                "item": {
+                    "providerId": provider_id,
+                    "itemId": item_id,
+                    "version": v2_item.map(|item| item.version.as_str()),
+                    "manifestSha256": manifest_sha256,
+                },
+                "files": files,
+            }
+        })
+    );
 }
 fn verify_registry(args: ListArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;

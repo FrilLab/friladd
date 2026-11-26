@@ -879,6 +879,61 @@ fn dry_run_requires_verified_content_and_keeps_the_project_empty() {
 }
 
 #[test]
+fn add_json_reports_dry_run_install_and_unchanged_without_human_output() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap();
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["nested/asset"]).to_string(),
+    )
+    .unwrap();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+
+    let dry_run = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--dry-run", "--json"],
+    );
+    assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
+    assert!(dry_run.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(output["command"], "add");
+    assert_eq!(output["data"]["dryRun"], true);
+    assert_eq!(output["data"]["files"][0]["action"], "install");
+    assert!(output["data"]["files"][0]["ownerBefore"].is_null());
+    assert_eq!(output["data"]["files"][0]["ownerAfter"]["itemId"], "sample");
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+
+    let install = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--json"],
+    );
+    assert_eq!(install.status.code(), Some(0), "{install:?}");
+    assert!(install.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&install.stdout).unwrap();
+    assert_eq!(output["data"]["dryRun"], false);
+    assert_eq!(output["data"]["files"][0]["action"], "install");
+    assert_eq!(
+        fs::read(project.path().join("nested/asset")).unwrap(),
+        b"asset"
+    );
+
+    let unchanged = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--json"],
+    );
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged:?}");
+    assert!(unchanged.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert_eq!(output["data"]["files"][0]["action"], "unchanged");
+    assert_eq!(
+        output["data"]["files"][0]["ownerBefore"]["itemId"],
+        "sample"
+    );
+}
+
+#[test]
 fn remote_source_diagnostics_do_not_disclose_credentials() {
     let root = tempdir().unwrap();
     let fixture = r#"{"schemaVersion":1,"registries":{"a":{"source":"https://username:password@example.invalid/token-path?key=private-query#fragment-secret"}}}"#;

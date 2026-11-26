@@ -48,7 +48,7 @@ friladd registry default <alias> [--global | --project <directory>]
 friladd registry remove <alias> [--global | --project <directory>]
 friladd registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
 friladd list [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
-friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run]
+friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run] [--json]
 ```
 
 For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md), [security model](docs/security-model.md), and [lock and recovery reference](docs/lock-and-recovery.md) for managed ownership and recovery behavior.

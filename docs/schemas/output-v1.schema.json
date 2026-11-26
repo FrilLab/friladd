@@ -1,0 +1,165 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FrilAdd machine output v1",
+  "type": "object",
+  "required": ["schemaVersion", "command", "data"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "command": { "enum": ["add", "installed", "status"] },
+    "data": { "type": "object" }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "properties": { "command": { "const": "add" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["dryRun", "item", "files"],
+            "properties": {
+              "dryRun": { "type": "boolean" },
+              "item": { "$ref": "#/$defs/addItem" },
+              "files": { "type": "array", "items": { "$ref": "#/$defs/addFile" } }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "command": { "const": "installed" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/installedItem" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "command": { "const": "status" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["items", "counts"],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "oneOf": [
+                    { "$ref": "#/$defs/statusItem" },
+                    { "$ref": "#/$defs/unmanagedItem" }
+                  ]
+                }
+              },
+              "counts": { "$ref": "#/$defs/counts" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "version": { "type": ["string", "null"] },
+    "owner": {
+      "type": "object",
+      "required": ["providerId", "itemId"],
+      "properties": {
+        "providerId": { "type": "string", "minLength": 1 },
+        "itemId": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "addItem": {
+      "type": "object",
+      "required": ["providerId", "itemId", "version", "manifestSha256"],
+      "properties": {
+        "providerId": { "type": "string", "minLength": 1 },
+        "itemId": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/version" },
+        "manifestSha256": { "$ref": "#/$defs/digest" }
+      },
+      "additionalProperties": false
+    },
+    "addFile": {
+      "type": "object",
+      "required": ["target", "action", "ownerBefore", "ownerAfter"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "action": { "enum": ["install", "unchanged"] },
+        "ownerBefore": { "oneOf": [{ "$ref": "#/$defs/owner" }, { "type": "null" }] },
+        "ownerAfter": { "$ref": "#/$defs/owner" }
+      },
+      "additionalProperties": false
+    },
+    "installedItem": {
+      "type": "object",
+      "required": ["providerId", "itemId", "version", "manifestSha256", "fileCount"],
+      "properties": {
+        "providerId": { "type": "string", "minLength": 1 },
+        "itemId": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/version" },
+        "manifestSha256": { "$ref": "#/$defs/digest" },
+        "fileCount": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "statusItem": {
+      "type": "object",
+      "required": ["providerId", "itemId", "version", "manifestSha256", "files"],
+      "properties": {
+        "providerId": { "type": "string", "minLength": 1 },
+        "itemId": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/version" },
+        "manifestSha256": { "$ref": "#/$defs/digest" },
+        "files": { "type": "array", "items": { "$ref": "#/$defs/fileStatus" } }
+      },
+      "additionalProperties": false
+    },
+    "unmanagedItem": {
+      "type": "object",
+      "required": ["selector", "state", "files"],
+      "properties": {
+        "selector": { "type": "string", "minLength": 1 },
+        "state": { "const": "unmanaged" },
+        "files": { "type": "array", "maxItems": 0 }
+      },
+      "additionalProperties": false
+    },
+    "fileStatus": {
+      "type": "object",
+      "required": ["target", "state", "expectedSha256", "actualSha256"],
+      "properties": {
+        "target": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["unchanged", "modified", "missing", "unsafe", "unreadable"] },
+        "expectedSha256": { "$ref": "#/$defs/digest" },
+        "actualSha256": { "oneOf": [{ "$ref": "#/$defs/digest" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "counts": {
+      "type": "object",
+      "properties": {
+        "unchanged": { "type": "integer", "minimum": 0 },
+        "modified": { "type": "integer", "minimum": 0 },
+        "missing": { "type": "integer", "minimum": 0 },
+        "unsafe": { "type": "integer", "minimum": 0 },
+        "unreadable": { "type": "integer", "minimum": 0 },
+        "unmanaged": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  }
+}
