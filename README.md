@@ -51,6 +51,9 @@ friladd list [<registry-alias> | --registry <alias-or-source>] [--project <direc
 friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run] [--json]
 friladd installed [--project <directory>] [--json]
 friladd status [<item-or-registry/item>] [--project <directory>] [--json] [--check]
+friladd update <item-or-registry/item> --registry <alias-or-source> [--version <exact-v2-version>] [--allow-downgrade] [--project <directory>] [--dry-run] [--json]
+friladd remove <item-or-registry/item> [--project <directory>] [--dry-run] [--json]
+friladd restore [<item-or-registry/item>] [--project <directory>] [--dry-run] [--json]
 ```
 
 For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md), [security model](docs/security-model.md), and [lock and recovery reference](docs/lock-and-recovery.md) for managed ownership and recovery behavior.
@@ -124,6 +127,8 @@ The installer and verifier preserve exact bytes, including binary data such as G
 ### Managed state
 
 Successful adds record item provenance and file ownership in `friladd.lock.json` in the same recoverable transaction as the installed files. `friladd installed` lists lock records without network access. `friladd status` hashes only recorded targets and reports local drift without network access or writes. Use `--check` in automation to return exit status 2 when a file is modified, missing, unsafe, or unreadable.
+
+`update` requires an explicit candidate registry manifest. It never selects a newer version automatically, refuses provider changes and local edits, and requires `--allow-downgrade` for a Registry v2 downgrade. `remove` deletes only unchanged managed files. `restore` recreates only missing files from the exact digest and locator in the lock; it never substitutes a newer source. Resolve local edits manually before retrying lifecycle operations, and keep normal project backups for recovery from user mistakes.
 
 ## Registry manifest v1
 
