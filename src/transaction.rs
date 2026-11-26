@@ -73,6 +73,12 @@ struct Project {
     _lock: File,
 }
 
+impl Drop for Project {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self._lock);
+    }
+}
+
 impl Plan {
     /// An edit that creates a path must explicitly expect it to be absent.
     /// Removals require ownership even if the path is already absent.
