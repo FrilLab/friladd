@@ -8,41 +8,90 @@ use crate::{
 };
 
 pub const MAX_FILE_BYTES: usize = 10 * 1024 * 1024;
+pub const MAX_OPERATION_BYTES: u64 = 512 * 1024 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn acquire_files(
     source: &RegistrySource,
     plan: &InstallationPlan,
-) -> Result<Vec<Arc<[u8]>>, String> {
-    acquire_files_with_root(source, plan, None)
+) -> Result<Vec<AcquiredFile>, String> {
+    acquire_files_with_policy(source, plan, None, true)
 }
 
+pub fn acquire_v2_files(
+    source: &RegistrySource,
+    plan: &InstallationPlan,
+) -> Result<Vec<AcquiredFile>, String> {
+    acquire_files_with_policy(source, plan, None, false)
+}
+
+#[cfg(test)]
 fn acquire_files_with_root(
     source: &RegistrySource,
     plan: &InstallationPlan,
     test_root: Option<Certificate>,
-) -> Result<Vec<Arc<[u8]>>, String> {
+) -> Result<Vec<AcquiredFile>, String> {
+    acquire_files_with_policy(source, plan, test_root, true)
+}
+
+fn acquire_files_with_policy(
+    source: &RegistrySource,
+    plan: &InstallationPlan,
+    test_root: Option<Certificate>,
+    allow_suffix: bool,
+) -> Result<Vec<AcquiredFile>, String> {
     let mut contents = Vec::with_capacity(plan.files.len());
-    let mut acquired = HashMap::<&str, (&str, Arc<[u8]>)>::new();
+    let mut acquired = HashMap::<&str, (&str, Arc<[u8]>, Option<String>)>::new();
+    let mut lengths = Vec::with_capacity(plan.files.len());
     for file in &plan.files {
         let source_path = file.source.as_str();
         let digest = file.expected_sha256.as_str();
         let bytes = match acquired.get(source_path) {
-            Some((previous, bytes)) => {
+            Some((previous, bytes, resolved)) => {
                 check_repeated_digest(source_path, previous, digest)?;
-                Arc::clone(bytes)
+                (Arc::clone(bytes), resolved.clone())
             }
             None => {
-                let bytes: Arc<[u8]> =
-                    acquire_file(source, source_path, digest, test_root.clone())?.into();
-                acquired.insert(source_path, (digest, Arc::clone(&bytes)));
-                bytes
+                let (bytes, resolved) = acquire_file_with_policy(
+                    source,
+                    source_path,
+                    digest,
+                    test_root.clone(),
+                    allow_suffix,
+                )?;
+                let bytes: Arc<[u8]> = bytes.into();
+                acquired.insert(source_path, (digest, Arc::clone(&bytes), resolved.clone()));
+                (bytes, resolved)
             }
         };
-        contents.push(bytes);
+        lengths.push(bytes.0.len() as u64);
+        contents.push(AcquiredFile {
+            bytes: bytes.0,
+            resolved_locator: bytes.1,
+        });
     }
+    check_staged_bytes(lengths)?;
     Ok(contents)
+}
+
+fn check_staged_bytes(lengths: impl IntoIterator<Item = u64>) -> Result<(), String> {
+    let mut total = 0_u64;
+    for length in lengths {
+        total = total
+            .checked_add(length)
+            .ok_or("Transaction exceeds the 512 MiB byte limit for staged files")?;
+        if total > MAX_OPERATION_BYTES {
+            return Err("Transaction exceeds the 512 MiB byte limit for staged files".into());
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct AcquiredFile {
+    pub bytes: Arc<[u8]>,
+    pub resolved_locator: Option<String>,
 }
 
 /// Verify each unique source independently without retaining file contents.
@@ -76,7 +125,7 @@ pub fn verify_v2_files(
     for item in &registry.items {
         for file in &item.files {
             if seen.insert(&file.source) {
-                let bytes =
+                let (bytes, _) =
                     acquire_file_with_policy(source, &file.source, &file.sha256, None, false)?;
                 if bytes.len() as u64 != file.size {
                     return Err(format!(
@@ -108,6 +157,7 @@ fn acquire_file(
     test_root: Option<Certificate>,
 ) -> Result<Vec<u8>, String> {
     acquire_file_with_policy(source, file_source, expected_sha256, test_root, true)
+        .map(|(bytes, _)| bytes)
 }
 
 fn acquire_file_with_policy(
@@ -116,9 +166,9 @@ fn acquire_file_with_policy(
     expected_sha256: &str,
     test_root: Option<Certificate>,
     allow_suffix: bool,
-) -> Result<Vec<u8>, String> {
-    let bytes = match source {
-        RegistrySource::Local { root } => read_local_source(root, file_source)?,
+) -> Result<(Vec<u8>, Option<String>), String> {
+    let (bytes, resolved) = match source {
+        RegistrySource::Local { root } => (read_local_source(root, file_source)?, None),
         RegistrySource::Remote { manifest_url } => {
             let source_path = validate_relative_path(file_source, "source")?;
             let url = manifest_url
@@ -132,19 +182,28 @@ fn acquire_file_with_policy(
                     "Registry source escaped its HTTPS origin: {file_source}"
                 ));
             }
-            fetch_url_with_policy(
+            let (bytes, final_url) = fetch_url_with_policy(
                 &url,
                 MAX_FILE_BYTES,
                 &format!("file {file_source}"),
                 test_root,
                 REQUEST_TIMEOUT,
                 allow_suffix,
-            )?
-            .0
+            )?;
+            let mut final_url = final_url;
+            final_url.set_query(None);
+            final_url.set_fragment(None);
+            final_url
+                .set_username("")
+                .map_err(|_| "Invalid resolved artifact locator")?;
+            final_url
+                .set_password(None)
+                .map_err(|_| "Invalid resolved artifact locator")?;
+            (bytes, Some(final_url.to_string()))
         }
     };
     verify_sha256(&bytes, expected_sha256, file_source)?;
-    Ok(bytes)
+    Ok((bytes, resolved))
 }
 
 fn read_local_source(root: &Path, source: &str) -> Result<Vec<u8>, String> {
@@ -307,6 +366,13 @@ fn verify_sha256(bytes: &[u8], expected: &str, source: &str) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_fanout_over_operation_byte_budget_before_staging_copies() {
+        let err = check_staged_bytes(std::iter::repeat_n(MAX_FILE_BYTES as u64, 52)).unwrap_err();
+        assert!(err.contains("512 MiB"));
+        assert!(check_staged_bytes(std::iter::repeat_n(MAX_FILE_BYTES as u64, 51)).is_ok());
+    }
     use std::{
         io::{self, Cursor, Write},
         net::TcpListener,
@@ -480,9 +546,30 @@ mod tests {
         });
         let acquired = acquire_files_with_root(&source, &plan, Some(root)).unwrap();
         handle.join().unwrap();
-        assert_eq!(acquired[0].as_ref(), contents);
-        assert!(Arc::ptr_eq(&acquired[0], &acquired[1]));
+        assert_eq!(acquired[0].bytes.as_ref(), contents);
+        assert!(Arc::ptr_eq(&acquired[0].bytes, &acquired[1].bytes));
         assert!(!project.path().join("src").exists());
+    }
+
+    #[test]
+    fn reports_final_same_origin_artifact_locator() {
+        let contents = b"asset";
+        let digest = Sha256::digest(contents)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let (base, root, handle) = https_sequence(&[
+            ("302 Found", 0, "Location: /assets/asset\r\n", b""),
+            ("200 OK", contents.len(), "", contents),
+        ]);
+        let source = RegistrySource::Remote { manifest_url: base };
+        let result =
+            acquire_file_with_policy(&source, "asset", &digest, Some(root), false).unwrap();
+        handle.join().unwrap();
+        assert_eq!(result.0, contents);
+        let locator = result.1.unwrap();
+        assert!(locator.starts_with("https://localhost:"));
+        assert!(locator.ends_with("/assets/asset"));
     }
 
     #[test]
@@ -551,6 +638,36 @@ mod tests {
         handle.join().unwrap();
         assert!(error.contains("redirect rejected"), "{error}");
         assert!(!error.contains("private-value"), "{error}");
+    }
+
+    #[test]
+    fn v2_file_acquisition_rejects_query_redirects() {
+        let (mut manifest_url, root, handle) = https_fixture(
+            "302 Found",
+            0,
+            "Location: /artifact.bin?signature=private-value\r\n",
+            b"",
+        );
+        manifest_url.set_path("/registry.json");
+        let source = RegistrySource::Remote { manifest_url };
+        let project = tempfile::tempdir().unwrap();
+        let plan = InstallationPlan {
+            project_root: project.path().to_path_buf(),
+            files: vec![crate::planner::PlannedFile {
+                source: "artifact.bin".into(),
+                target: "artifact.bin".into(),
+                target_display: "artifact.bin".into(),
+                destination: project.path().join("artifact.bin"),
+                expected_sha256: "0".repeat(64),
+                exists: false,
+            }],
+            conflicts: Vec::new(),
+        };
+        let error = acquire_files_with_policy(&source, &plan, Some(root), false).unwrap_err();
+        handle.join().unwrap();
+        assert!(error.contains("redirect rejected"), "{error}");
+        assert!(!error.contains("private-value"), "{error}");
+        assert!(!project.path().join("artifact.bin").exists());
     }
 
     #[test]

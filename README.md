@@ -35,7 +35,7 @@ mkdir -p /tmp/friladd-consumer
   --project /tmp/friladd-consumer
 ```
 
-The final command writes two files under `/tmp/friladd-consumer/src/components/envelope-reveal/`. Existing files are never overwritten. Run it in a disposable project directory or use `--dry-run` first.
+The final command writes two files under `/tmp/friladd-consumer/src/components/envelope-reveal/` and records their ownership in `friladd.lock.json` in the same recoverable transaction. Existing files are never overwritten. Repeating the same add is a no-op when the managed files are unchanged; locally modified files are preserved and block the operation. Run `--dry-run` first to verify the content and plan without writing project state.
 
 ## CLI
 
@@ -48,10 +48,10 @@ friladd registry default <alias> [--global | --project <directory>]
 friladd registry remove <alias> [--global | --project <directory>]
 friladd registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
 friladd list [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
-friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run]
+friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run] [--json]
 ```
 
-For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md) and [security model](docs/security-model.md). The [lock and recovery reference](docs/lock-and-recovery.md) describes the shared foundation for planned managed installs.
+For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md), [security model](docs/security-model.md), and [lock and recovery reference](docs/lock-and-recovery.md) for managed ownership and recovery behavior.
 
 Registry authors can use [Registry v2](docs/registry-v2.md) for versioned metadata and asset declarations. Registry v1 remains supported.
 
@@ -115,7 +115,7 @@ The installer and verifier preserve exact bytes, including binary data such as G
 
 ### Dry run
 
-`--dry-run` uses the same manifest parsing, destination planning, and content acquisition and hash checks as installation. It prints each planned destination and any existing-file conflict. It creates no project directories and changes no project files. For remote registries, it may download the manifest and declared source files to check their hashes.
+`--dry-run` uses the same manifest parsing, destination planning, content acquisition, hash checks, and transaction preconditions as installation. It prints each planned destination and ownership effect. It creates no project directories, lock, transaction state, or cache and changes no project files. For remote registries, it may download the manifest and declared source files to check their hashes.
 
 ## Registry manifest v1
 

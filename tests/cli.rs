@@ -79,6 +79,17 @@ fn list_and_unknown_component_work_through_cli() {
     let unknown = run(&["add", "not-here", "--registry", &registry]);
     assert!(!unknown.status.success());
     assert!(String::from_utf8_lossy(&unknown.stderr).contains("Component not found"));
+
+    let missing_root = tempdir().unwrap();
+    let missing_project = missing_root.path().join("not-created");
+    let missing = run(&[
+        "add",
+        "unknown/sample",
+        "--project",
+        missing_project.to_str().unwrap(),
+    ]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("not registered"));
 }
 
 #[test]
@@ -143,6 +154,78 @@ fn dry_run_creates_no_project_files_and_install_is_byte_identical() {
         fs::read(project.path().join("package.json")).unwrap(),
         fs::read(repo_path("fixtures/consumer-project/package.json")).unwrap()
     );
+}
+
+#[test]
+fn managed_add_records_ownership_is_idempotent_and_refuses_local_edits() {
+    let registry = repo_path("registry/registry.json");
+    let project = tempdir().unwrap();
+    let path = project.path().display().to_string();
+    let install = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(
+        install.status.success(),
+        "{}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    let lock_path = project.path().join("friladd.lock.json");
+    let lock_bytes = fs::read(&lock_path).unwrap();
+    let lock: serde_json::Value = serde_json::from_slice(&lock_bytes).unwrap();
+    assert_eq!(lock["schemaVersion"], 1);
+    assert_eq!(lock["items"].as_array().unwrap().len(), 1);
+    assert_eq!(lock["items"][0]["files"].as_array().unwrap().len(), 2);
+
+    let repeated = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(
+        repeated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repeated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&repeated.stdout).contains("no changes"));
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_bytes);
+
+    let target = project
+        .path()
+        .join("src/components/envelope-reveal/EnvelopeReveal.tsx");
+    fs::write(&target, b"user edit").unwrap();
+    let drifted = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(!drifted.status.success());
+    assert!(String::from_utf8_lossy(&drifted.stderr).contains("status"));
+    assert_eq!(fs::read(&target).unwrap(), b"user edit");
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_bytes);
+    fs::remove_file(&target).unwrap();
+    let missing = run(&[
+        "add",
+        "envelope-reveal",
+        "--registry",
+        &registry,
+        "--project",
+        &path,
+    ]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("restore"));
+    assert!(!target.exists());
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_bytes);
 }
 
 #[test]
@@ -793,6 +876,80 @@ fn dry_run_requires_verified_content_and_keeps_the_project_empty() {
     for target in ["nested/asset", "nested/copy"] {
         assert_eq!(fs::read(project.path().join(target)).unwrap(), b"asset");
     }
+}
+
+#[test]
+fn add_json_reports_dry_run_install_and_unchanged_without_human_output() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap();
+    fs::write(
+        &manifest,
+        manifest_with_targets(&["nested/asset"]).to_string(),
+    )
+    .unwrap();
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+
+    let dry_run = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--dry-run", "--json"],
+    );
+    assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
+    assert!(dry_run.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(output["command"], "add");
+    assert_eq!(output["data"]["dryRun"], true);
+    assert_eq!(output["data"]["files"][0]["action"], "install");
+    assert!(output["data"]["files"][0]["ownerBefore"].is_null());
+    assert_eq!(output["data"]["files"][0]["ownerAfter"]["itemId"], "sample");
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+
+    let install = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--json"],
+    );
+    assert_eq!(install.status.code(), Some(0), "{install:?}");
+    assert!(install.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&install.stdout).unwrap();
+    assert_eq!(output["data"]["dryRun"], false);
+    assert_eq!(output["data"]["files"][0]["action"], "install");
+    assert_eq!(
+        fs::read(project.path().join("nested/asset")).unwrap(),
+        b"asset"
+    );
+
+    let lock_before_noop = fs::read(project.path().join("friladd.lock.json")).unwrap();
+    let unchanged_dry_run = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--dry-run", "--json"],
+    );
+    assert_eq!(
+        unchanged_dry_run.status.code(),
+        Some(0),
+        "{unchanged_dry_run:?}"
+    );
+    assert!(unchanged_dry_run.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&unchanged_dry_run.stdout).unwrap();
+    assert_eq!(output["data"]["dryRun"], true);
+    assert_eq!(output["data"]["files"][0]["action"], "unchanged");
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        lock_before_noop
+    );
+
+    let unchanged = run_in(
+        project.path(),
+        &["add", "sample", "--registry", source, "--json"],
+    );
+    assert_eq!(unchanged.status.code(), Some(0), "{unchanged:?}");
+    assert!(unchanged.stderr.is_empty());
+    let output: serde_json::Value = serde_json::from_slice(&unchanged.stdout).unwrap();
+    assert_eq!(output["data"]["files"][0]["action"], "unchanged");
+    assert_eq!(
+        output["data"]["files"][0]["ownerBefore"]["itemId"],
+        "sample"
+    );
 }
 
 #[test]

@@ -8,8 +8,10 @@ use crate::registry::{RegistryItem, validate_relative_path, validate_targets};
 #[derive(Debug)]
 pub struct PlannedFile {
     pub source: String,
+    #[cfg(test)]
     pub target: PathBuf,
     pub target_display: String,
+    #[cfg(test)]
     pub destination: PathBuf,
     pub expected_sha256: String,
     pub exists: bool,
@@ -55,8 +57,10 @@ pub fn build_plan(project: &Path, item: &RegistryItem) -> Result<InstallationPla
         }
         files.push(PlannedFile {
             source: file.source.clone(),
+            #[cfg(test)]
             target,
             target_display,
+            #[cfg(test)]
             destination,
             expected_sha256: file.sha256.clone(),
             exists,
@@ -129,6 +133,7 @@ pub fn validate_destination(
     Ok(true)
 }
 
+#[cfg(test)]
 pub fn validate_file_plan(plan: &InstallationPlan) -> Result<(), String> {
     let mut conflicts = Vec::new();
     for file in &plan.files {
