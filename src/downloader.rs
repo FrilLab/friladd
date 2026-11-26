@@ -15,13 +15,30 @@ pub fn acquire_files(
     source: &RegistrySource,
     plan: &InstallationPlan,
 ) -> Result<Vec<Arc<[u8]>>, String> {
-    acquire_files_with_root(source, plan, None)
+    acquire_files_with_policy(source, plan, None, true)
 }
 
+pub fn acquire_v2_files(
+    source: &RegistrySource,
+    plan: &InstallationPlan,
+) -> Result<Vec<Arc<[u8]>>, String> {
+    acquire_files_with_policy(source, plan, None, false)
+}
+
+#[cfg(test)]
 fn acquire_files_with_root(
     source: &RegistrySource,
     plan: &InstallationPlan,
     test_root: Option<Certificate>,
+) -> Result<Vec<Arc<[u8]>>, String> {
+    acquire_files_with_policy(source, plan, test_root, true)
+}
+
+fn acquire_files_with_policy(
+    source: &RegistrySource,
+    plan: &InstallationPlan,
+    test_root: Option<Certificate>,
+    allow_suffix: bool,
 ) -> Result<Vec<Arc<[u8]>>, String> {
     let mut contents = Vec::with_capacity(plan.files.len());
     let mut acquired = HashMap::<&str, (&str, Arc<[u8]>)>::new();
@@ -34,8 +51,14 @@ fn acquire_files_with_root(
                 Arc::clone(bytes)
             }
             None => {
-                let bytes: Arc<[u8]> =
-                    acquire_file(source, source_path, digest, test_root.clone())?.into();
+                let bytes: Arc<[u8]> = acquire_file_with_policy(
+                    source,
+                    source_path,
+                    digest,
+                    test_root.clone(),
+                    allow_suffix,
+                )?
+                .into();
                 acquired.insert(source_path, (digest, Arc::clone(&bytes)));
                 bytes
             }
@@ -551,6 +574,36 @@ mod tests {
         handle.join().unwrap();
         assert!(error.contains("redirect rejected"), "{error}");
         assert!(!error.contains("private-value"), "{error}");
+    }
+
+    #[test]
+    fn v2_file_acquisition_rejects_query_redirects() {
+        let (mut manifest_url, root, handle) = https_fixture(
+            "302 Found",
+            0,
+            "Location: /artifact.bin?signature=private-value\r\n",
+            b"",
+        );
+        manifest_url.set_path("/registry.json");
+        let source = RegistrySource::Remote { manifest_url };
+        let project = tempfile::tempdir().unwrap();
+        let plan = InstallationPlan {
+            project_root: project.path().to_path_buf(),
+            files: vec![crate::planner::PlannedFile {
+                source: "artifact.bin".into(),
+                target: "artifact.bin".into(),
+                target_display: "artifact.bin".into(),
+                destination: project.path().join("artifact.bin"),
+                expected_sha256: "0".repeat(64),
+                exists: false,
+            }],
+            conflicts: Vec::new(),
+        };
+        let error = acquire_files_with_policy(&source, &plan, Some(root), false).unwrap_err();
+        handle.join().unwrap();
+        assert!(error.contains("redirect rejected"), "{error}");
+        assert!(!error.contains("private-value"), "{error}");
+        assert!(!project.path().join("artifact.bin").exists());
     }
 
     #[test]

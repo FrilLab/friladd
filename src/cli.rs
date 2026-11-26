@@ -373,7 +373,11 @@ fn add(args: AddArgs) -> Result<(), String> {
             plan.conflicts.len()
         ));
     }
-    let contents = downloader::acquire_files(&loaded.source, &plan)?;
+    let contents = if loaded.v2.is_some() {
+        downloader::acquire_v2_files(&loaded.source, &plan)?
+    } else {
+        downloader::acquire_files(&loaded.source, &plan)?
+    };
     for (file, bytes) in plan.files.iter().zip(&contents) {
         let installed = lockfile::Content::of(bytes);
         if v2_item.is_some_and(|v| {
