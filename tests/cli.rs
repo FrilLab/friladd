@@ -1806,6 +1806,61 @@ fn update_requires_explicit_v2_downgrade_confirmation() {
     );
 }
 
+#[test]
+fn update_preserves_repeated_source_target_declarations() {
+    use sha2::Digest;
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let source = manifest.to_str().unwrap().to_owned();
+    fs::write(provider.path().join("shared.bin"), b"same bytes").unwrap();
+    let hash = format!("{:x}", sha2::Sha256::digest(b"same bytes"));
+    fs::write(
+        &manifest,
+        serde_json::json!({
+            "schemaVersion": 1,
+            "name": "test",
+            "items": [{
+                "name": "sample", "description": "test",
+                "files": [
+                    {"source":"shared.bin","target":"first.bin","sha256":hash},
+                    {"source":"shared.bin","target":"nested/second.bin","sha256":hash}
+                ]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let add = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    assert_eq!(add.status.code(), Some(0), "{add:?}");
+    let before = fs::read(project.path().join("friladd.lock.json")).unwrap();
+    let update = run_in(
+        project.path(),
+        &["update", "sample", "--registry", &source, "--json"],
+    );
+    assert_eq!(update.status.code(), Some(0), "{update:?}");
+    assert_eq!(
+        fs::read(project.path().join("first.bin")).unwrap(),
+        b"same bytes"
+    );
+    assert_eq!(
+        fs::read(project.path().join("nested/second.bin")).unwrap(),
+        b"same bytes"
+    );
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        before
+    );
+    let report: serde_json::Value = serde_json::from_slice(&update.stdout).unwrap();
+    assert_eq!(
+        report["data"]["items"][0]["actions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
 fn v1_manifest(files: &[(&str, &str, &[u8])]) -> String {
     use sha2::{Digest, Sha256};
     serde_json::json!({

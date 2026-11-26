@@ -1089,7 +1089,9 @@ fn update(args: UpdateArgs) -> Result<(), String> {
         url::Url::parse(&resolved_source).map_err(|_| "Invalid candidate manifest provenance")?;
     let mut candidate_files = Vec::with_capacity(plan.files.len());
     let mut content_by_target = std::collections::BTreeMap::new();
-    for (file, acquired) in plan.files.iter().zip(&contents) {
+    for ((file, declaration), acquired) in
+        plan.files.iter().zip(&candidate_item.files).zip(&contents)
+    {
         let installed = lockfile::Content::of(&acquired.bytes);
         if let Some(v2) = v2_item
             && v2
@@ -1110,16 +1112,10 @@ fn update(args: UpdateArgs) -> Result<(), String> {
                 .map_err(|_| "Invalid candidate artifact locator")?
                 .to_string(),
         };
-        let declared_target = candidate_item
-            .files
-            .iter()
-            .find(|entry| entry.source == file.source)
-            .map(|entry| entry.target.clone())
-            .ok_or_else(|| format!("Candidate source {} has no target declaration", file.source))?;
         candidate_files.push(lockfile::OwnedFile {
             source: file.source.clone(),
             resolved_source: source_locator,
-            declared_target,
+            declared_target: declaration.target.clone(),
             target: file.target_display.clone(),
             expected_sha256: installed.sha256.clone(),
             installed: installed.clone(),
