@@ -6,7 +6,6 @@ use clap::{Args, Parser, Subcommand};
 use std::{
     env, fs,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 #[derive(Debug, Parser)]
@@ -497,13 +496,17 @@ fn add(args: AddArgs) -> Result<(), String> {
             plan.conflicts.len()
         ));
     }
-    let contents = if loaded.v2.is_some() {
-        downloader::acquire_v2_files(&loaded.source, &plan)?
+    let contents = if let Some(v2_item) = v2_item {
+        let sizes = v2_plan_sizes(v2_item, &plan)?;
+        downloader::acquire_v2_files_with_sizes(&loaded.source, &plan, &sizes)?
     } else {
         downloader::acquire_files(&loaded.source, &plan)?
     };
-    for (file, acquired) in plan.files.iter().zip(&contents) {
-        let installed = lockfile::Content::of(&acquired.bytes);
+    for (file, acquired) in plan.files.iter().zip(&contents.files) {
+        let installed = lockfile::Content {
+            sha256: acquired.sha256.clone(),
+            size: acquired.size,
+        };
         if let Some(locator) = &acquired.resolved_locator
             && let Some(record) = new_item
                 .files
@@ -534,13 +537,11 @@ fn add(args: AddArgs) -> Result<(), String> {
     }
     next.items.push(new_item);
     let mut edits = Vec::with_capacity(plan.files.len());
-    for (file, acquired) in plan.files.iter().zip(contents) {
+    for (file, acquired) in plan.files.iter().zip(contents.files) {
         edits.push(transaction::Edit {
             target: file.target_display.clone(),
             before: None,
-            write: Some(transaction::WriteSource::Shared(Arc::clone(
-                &acquired.bytes,
-            ))),
+            write: Some(transaction::WriteSource::File(acquired.path)),
         });
     }
     let transaction = transaction::Plan::new(before, next, edits)?;
@@ -1080,8 +1081,9 @@ fn update(args: UpdateArgs) -> Result<(), String> {
             ));
         }
     }
-    let contents = if loaded.v2.is_some() {
-        downloader::acquire_v2_files(&loaded.source, &plan)?
+    let contents = if let Some(v2) = v2_item {
+        let sizes = v2_plan_sizes(v2, &plan)?;
+        downloader::acquire_v2_files_with_sizes(&loaded.source, &plan, &sizes)?
     } else {
         downloader::acquire_files(&loaded.source, &plan)?
     };
@@ -1089,10 +1091,16 @@ fn update(args: UpdateArgs) -> Result<(), String> {
         url::Url::parse(&resolved_source).map_err(|_| "Invalid candidate manifest provenance")?;
     let mut candidate_files = Vec::with_capacity(plan.files.len());
     let mut content_by_target = std::collections::BTreeMap::new();
-    for ((file, declaration), acquired) in
-        plan.files.iter().zip(&candidate_item.files).zip(&contents)
+    for ((file, declaration), acquired) in plan
+        .files
+        .iter()
+        .zip(&candidate_item.files)
+        .zip(&contents.files)
     {
-        let installed = lockfile::Content::of(&acquired.bytes);
+        let installed = lockfile::Content {
+            sha256: acquired.sha256.clone(),
+            size: acquired.size,
+        };
         if let Some(v2) = v2_item
             && v2
                 .files
@@ -1120,7 +1128,7 @@ fn update(args: UpdateArgs) -> Result<(), String> {
             expected_sha256: installed.sha256.clone(),
             installed: installed.clone(),
         });
-        content_by_target.insert(file.target_display.clone(), Arc::clone(&acquired.bytes));
+        content_by_target.insert(file.target_display.clone(), acquired.path.clone());
     }
     candidate_files.sort_by(|left, right| left.target.cmp(&right.target));
     let candidate_lock_item = lockfile::Item {
@@ -1190,11 +1198,12 @@ fn update(args: UpdateArgs) -> Result<(), String> {
                 edits.push(transaction::Edit {
                     target: target.to_owned(),
                     before: Some(old.installed.clone()),
-                    write: Some(transaction::WriteSource::Shared(Arc::clone(
+                    write: Some(transaction::WriteSource::File(
                         content_by_target
                             .get(target)
-                            .ok_or("Missing verified candidate bytes")?,
-                    ))),
+                            .ok_or("Missing verified candidate bytes")?
+                            .clone(),
+                    )),
                 });
                 actions.push(json_file_action(
                     target,
@@ -1207,11 +1216,12 @@ fn update(args: UpdateArgs) -> Result<(), String> {
                 edits.push(transaction::Edit {
                     target: target.to_owned(),
                     before: None,
-                    write: Some(transaction::WriteSource::Shared(Arc::clone(
+                    write: Some(transaction::WriteSource::File(
                         content_by_target
                             .get(target)
-                            .ok_or("Missing verified candidate bytes")?,
-                    ))),
+                            .ok_or("Missing verified candidate bytes")?
+                            .clone(),
+                    )),
                 });
                 actions.push(json_file_action(
                     target,
@@ -1365,7 +1375,8 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
     let mut edits = Vec::new();
     let mut item_results = Vec::new();
     let mut restore_bytes = 0_u64;
-    let mut acquired = std::collections::BTreeMap::new();
+    let mut restore_requests = Vec::new();
+    let mut restore_targets = Vec::new();
     for item in &selected {
         let mut actions = Vec::new();
         for file in &item.files {
@@ -1380,27 +1391,17 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
                 }
                 transaction::Observation::Missing => {
                     restore_bytes = reserve_restore_bytes(restore_bytes, file.installed.size)?;
-                    let key = (
-                        file.resolved_source.clone(),
-                        file.installed.sha256.clone(),
-                        file.installed.size,
-                    );
-                    let bytes = if let Some(bytes) = acquired.get(&key) {
-                        Arc::clone(bytes)
-                    } else {
-                        let bytes = downloader::acquire_locked_file(
-                            &file.resolved_source,
-                            &file.installed.sha256,
-                            file.installed.size,
-                        )?;
-                        acquired.insert(key, Arc::clone(&bytes));
-                        bytes
-                    };
-                    edits.push(transaction::Edit {
-                        target: file.target.clone(),
-                        before: None,
-                        write: Some(transaction::WriteSource::Shared(bytes)),
+                    restore_requests.push(downloader::LockedArtifact {
+                        locator: file.resolved_source.clone(),
+                        expected_sha256: file.installed.sha256.clone(),
+                        expected_size: file.installed.size,
+                        max_bytes: if item.version.is_some() {
+                            downloader::MAX_V2_FILE_BYTES
+                        } else {
+                            downloader::MAX_FILE_BYTES
+                        },
                     });
+                    restore_targets.push(file.target.clone());
                     actions.push(json_file_action(
                         &file.target,
                         "restore",
@@ -1430,6 +1431,14 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
         }
         item_results.push(json_item_actions(item, actions));
     }
+    let restored = downloader::acquire_locked_files(&restore_requests)?;
+    for (target, artifact) in restore_targets.into_iter().zip(restored.files) {
+        edits.push(transaction::Edit {
+            target,
+            before: None,
+            write: Some(transaction::WriteSource::File(artifact.path)),
+        });
+    }
     let transaction = transaction::Plan::new(snapshot, before, edits)?;
     transaction.check(project_root)?;
     if args.dry_run {
@@ -1449,6 +1458,22 @@ fn reserve_restore_bytes(current: u64, size: u64) -> Result<u64, String> {
         return Err("Restore exceeds the 512 MiB transaction byte limit".into());
     }
     Ok(total)
+}
+
+fn v2_plan_sizes(
+    item: &crate::registry_v2::Item,
+    plan: &planner::InstallationPlan,
+) -> Result<Vec<u64>, String> {
+    plan.files
+        .iter()
+        .map(|file| {
+            item.files
+                .iter()
+                .find(|entry| entry.source == file.source)
+                .map(|entry| entry.size)
+                .ok_or_else(|| format!("No size declaration for source {}", file.source))
+        })
+        .collect()
 }
 
 fn json_file_action(

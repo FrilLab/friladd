@@ -118,7 +118,7 @@ friladd registry verify --registry ./registry.json
 friladd registry verify frilcraft
 ```
 
-The installer and verifier preserve exact bytes, including binary data such as GLB models, PNG textures, and audio. The current 10 MiB per-file limit still applies; verification is not a model, image, or audio format validator. Publish only reviewed assets with appropriate license notices. See [distribution roadmap](docs/distribution-roadmap.md) for proposed lifecycle and larger-asset support.
+The installer and verifier preserve exact bytes, including binary data such as GLB models, PNG textures, and audio. Registry v1 retains its 10 MiB per-file cap; Registry v2 streams files up to 100 MiB and caps each operation at 512 MiB. Acquisition hashes and counts bytes incrementally into temporary staging files before the transaction can write project destinations. Verification uses the same streaming path and removes temporary files. These limits do not validate model, image, or audio formats. Publish only reviewed assets with appropriate license notices.
 
 ### Dry run
 
@@ -167,7 +167,7 @@ The sample files live under `registry/fixtures/` and are not represented as publ
 - `source` and `target` are relative slash-separated paths. Absolute paths, empty segments, `.`/`..`, backslashes, drive letters, UNC paths, Windows device names such as `NUL`, trailing dots, URL syntax, and non-portable path characters are rejected.
 - A local source must be a regular file inside the manifest directory. Symlinks in source paths are rejected.
 - Target ancestors are checked component by component. Any symlink is rejected, including one that currently resolves inside the project. Existing target files are reported as conflicts and block installation.
-- Registry manifests are limited to 1 MiB. Each source file is limited to 10 MiB. HTTPS uses a 5-second connect timeout, a 30-second request timeout, and at most five redirects; redirects must stay on HTTPS. Hash verification applies after redirects.
+- Registry manifests are limited to 1 MiB. Registry v1 files are limited to 10 MiB; Registry v2 files are limited to 100 MiB and each staged operation to 512 MiB. HTTPS uses a 5-second connect timeout, a 30-second manifest timeout, and a 5-minute artifact request timeout. Artifact redirects are limited to four and remain on the original HTTPS origin. Hash and v2 size verification apply while streaming after redirects.
 - All selected contents are acquired and hash-verified before the installer creates project directories. Files are staged beside their destinations, then added with a no-overwrite hard link. On a later failure, FrilAdd removes its installed files, temporary files, and newly created empty directories where possible.
 - A manifest's digest detects content that differs from that manifest; it is not a signature or publisher identity. Review the registry and source code you choose to trust.
 

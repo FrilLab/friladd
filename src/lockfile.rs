@@ -13,7 +13,7 @@ use url::Url;
 
 pub const NAME: &str = "friladd.lock.json";
 pub const MAX_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_FILE_BYTES: u64 = 100 * 1024 * 1024;
+pub const MAX_FILE_BYTES: u64 = crate::downloader::MAX_V2_FILE_BYTES as u64;
 const MAX_ITEMS: usize = 10_000;
 const MAX_FILES: usize = 100_000;
 

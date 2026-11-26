@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const MAX_ASSET_BYTES: u64 = 100 * 1024 * 1024;
+pub const MAX_ASSET_BYTES: u64 = crate::downloader::MAX_V2_FILE_BYTES as u64;
 pub const TARGET_MAP_NAME: &str = ".friladd-targets.json";
 const MAX_MAPPING_BYTES: usize = 64 * 1024;
 const MAX_DECLARATIONS: usize = 256;

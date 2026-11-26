@@ -1,6 +1,6 @@
 # Registry Manifest v2
 
-Registry v2 is an opt-in protocol. Registry v1 manifests, including the original FrilCraft format, keep their existing syntax and reader. Register either schema with the same `registry add` command. Use `list` to inspect names and `registry verify` to validate the manifest's declared files. Managed add, cross-registry execution, and large-file streaming are delivered in the corresponding lifecycle issues. [Registry v2 JSON Schema](schemas/registry-v2.schema.json)
+Registry v2 is an opt-in protocol. Registry v1 manifests, including the original FrilCraft format, keep their existing syntax and reader. Register either schema with the same `registry add` command. Use `list` to inspect names and `registry verify` to validate the manifest's declared files. Registry v2 artifacts stream into verified temporary staging before transactional installation. [Registry v2 JSON Schema](schemas/registry-v2.schema.json)
 
 ## Identity and selection
 
@@ -10,7 +10,7 @@ Registry v2 is an opt-in protocol. Registry v1 manifests, including the original
 
 ## Files and metadata
 
-- Each file has portable relative `source` and `target`, a lowercase 64-hex `sha256`, and an integer `size` in bytes. The format allows up to 100 MiB per file. Larger fixtures require the streaming transport in #17. Select the provider manifest itself with a local path or an HTTPS URL. V2 manifest URLs omit queries, fragments, and credentials. External artifact URLs are outside this schema. HTTPS artifact requests and redirects stay on the original origin. Artifact redirect destinations omit queries and fragments.
+- Each file has portable relative `source` and `target`, a lowercase 64-hex `sha256`, and an integer `size` in bytes. Files stream with incremental SHA-256 and size checks, up to 100 MiB per file and 512 MiB per operation. A five-minute artifact request timeout applies, with a five-second connection timeout. Select the provider manifest itself with a local path or an HTTPS URL. V2 manifest URLs omit queries, fragments, and credentials. External artifact URLs are outside this schema. HTTPS artifact requests and redirects stay on the original origin. Artifact redirect destinations omit queries and fragments.
 - Optional fields are `description` (at most 1,024 UTF-8 bytes), `tags` (at most 32 unique identifier-like values of at most 64 bytes), and `license` (`id`, optionally a `notice` matching a listed source file). License declarations describe the publisher's material. FrilAdd does not infer a license or check rights.
 - The manifest is UTF-8 JSON of up to 1 MiB and 1,000 items. Each item has at most 256 files, 256 registry dependencies, and 256 package requirements. Unknown fields and versions fail. Repeated sources must agree on the digest and size. Each item's targets must be portable, unique, and free of case and prefix collisions.
 

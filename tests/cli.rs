@@ -939,7 +939,10 @@ fn registry_verify_and_add_preserve_binary_assets_and_detect_tampering() {
     fs::write(provider.join("model.glb"), b"tampered").unwrap();
     let rejected = run_in(&consumer, &["registry", "verify", "--registry", manifest]);
     assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SHA-256 mismatch"));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("SHA-256 mismatch"),
+        "{rejected:?}"
+    );
     fs::remove_file(provider.join("model.glb")).unwrap();
     let missing = run_in(&consumer, &["registry", "verify", "--registry", manifest]);
     assert!(!missing.status.success());
@@ -1745,7 +1748,10 @@ fn restore_recreates_exact_locked_bytes_and_refuses_changed_source() {
     fs::write(provider.path().join("source.bin"), b"different bytes").unwrap();
     let rejected = run_in(project.path(), &["restore", "--project", path]);
     assert_eq!(rejected.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("SHA-256 mismatch"));
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("Size mismatch for locked artifact"),
+        "{rejected:?}"
+    );
     assert!(!project.path().join("assets/model.bin").exists());
 }
 
@@ -1859,6 +1865,124 @@ fn update_preserves_repeated_source_target_declarations() {
             .len(),
         2
     );
+}
+
+#[test]
+fn v2_large_binary_streams_through_verified_staging_and_v1_cap_is_preserved() {
+    use sha2::Digest;
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let data: Vec<u8> = (0..12 * 1024 * 1024)
+        .map(|index| ((index * 31) % 251) as u8)
+        .collect();
+    let texture: Vec<u8> = (0..1024 * 1024)
+        .map(|index| ((index * 17) % 253) as u8)
+        .collect();
+    fs::write(provider.path().join("model.glb"), &data).unwrap();
+    fs::write(provider.path().join("albedo.png"), &texture).unwrap();
+    let digest = format!("{:x}", sha2::Sha256::digest(&data));
+    let texture_digest = format!("{:x}", sha2::Sha256::digest(&texture));
+    let v2_manifest = provider.path().join("registry-v2.json");
+    fs::write(
+        &v2_manifest,
+        serde_json::json!({
+            "schemaVersion": 2,
+            "id": "org.example.large-assets",
+            "name": "large-assets",
+            "items": [{
+                "id": "model", "version": "1.0.0", "kind": "asset",
+                "files": [
+                    {"source":"model.glb","target":"models/model.glb","sha256":digest,"size":data.len()},
+                    {"source":"albedo.png","target":"textures/albedo.png","sha256":texture_digest,"size":texture.len()}
+                ]
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let v2_source = v2_manifest.to_str().unwrap();
+    let project_path = project.path().to_str().unwrap();
+    let verified = run_in(
+        project.path(),
+        &[
+            "registry",
+            "verify",
+            "--registry",
+            v2_source,
+            "--project",
+            project_path,
+        ],
+    );
+    assert_eq!(verified.status.code(), Some(0), "{verified:?}");
+    assert!(!project.path().join("friladd.lock.json").exists());
+    let dry_run = run_in(
+        project.path(),
+        &[
+            "add",
+            "model",
+            "--registry",
+            v2_source,
+            "--project",
+            project_path,
+            "--dry-run",
+        ],
+    );
+    assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
+    assert!(!project.path().join("models/model.glb").exists());
+    assert!(!project.path().join("friladd.lock.json").exists());
+
+    let added = run_in(
+        project.path(),
+        &[
+            "add",
+            "model",
+            "--registry",
+            v2_source,
+            "--project",
+            project_path,
+        ],
+    );
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    assert_eq!(
+        fs::read(project.path().join("models/model.glb")).unwrap(),
+        data
+    );
+    assert_eq!(
+        fs::read(project.path().join("textures/albedo.png")).unwrap(),
+        texture
+    );
+    let lock: serde_json::Value =
+        serde_json::from_slice(&fs::read(project.path().join("friladd.lock.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        lock["items"][0]["files"][0]["installed"]["size"],
+        12 * 1024 * 1024
+    );
+    fs::remove_file(project.path().join("models/model.glb")).unwrap();
+    let restored = run_in(project.path(), &["restore", "--project", project_path]);
+    assert_eq!(restored.status.code(), Some(0), "{restored:?}");
+    assert_eq!(
+        fs::read(project.path().join("models/model.glb")).unwrap(),
+        data
+    );
+    assert_eq!(
+        fs::read(project.path().join("textures/albedo.png")).unwrap(),
+        texture
+    );
+
+    let v1_manifest = provider.path().join("registry-v1.json");
+    fs::write(
+        &v1_manifest,
+        serde_json::json!({
+            "schemaVersion": 1, "name": "large-v1",
+            "items": [{"name":"model","description":"large model","files":[{"source":"model.glb","target":"v1-model.glb","sha256":digest}]}]
+        }).to_string(),
+    ).unwrap();
+    let v1_source = v1_manifest.to_str().unwrap();
+    let rejected = run_in(project.path(), &["add", "model", "--registry", v1_source]);
+    assert_eq!(rejected.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("10485760 byte limit"));
+    assert!(!project.path().join("v1-model.glb").exists());
 }
 
 fn v1_manifest(files: &[(&str, &str, &[u8])]) -> String {
