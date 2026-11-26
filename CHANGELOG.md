@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add the validated lock v1 and crash-recoverable transaction foundation for upcoming managed lifecycle commands.
+
 - Add registry verification for source and binary bytes without installing files.
 - Support explicit project scope across registry management and reject ambiguous selector or scope flags.
 - Reject reserved metadata targets and portable path collisions, and constrain HTTPS fetches to same-origin redirects with redacted errors.

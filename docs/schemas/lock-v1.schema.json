@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FrilAdd Project Lock v1",
+  "description": "Use the FrilAdd reader for canonical source locators, exact versions, ownership and dependency consistency, mapping, and byte and aggregate limits.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "providers",
+    "items"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "type": "integer",
+      "const": 1
+    },
+    "providers": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/provider"
+      },
+      "maxItems": 10000
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/item"
+      },
+      "maxItems": 10000
+    }
+  },
+  "$defs": {
+    "path": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9._-]*[A-Za-z0-9_-]/)*[A-Za-z0-9._-]*[A-Za-z0-9_-](?![\\s\\S])",
+      "not": {
+        "pattern": "(?:^|/)(?:[Cc][Oo][Nn]|[Pp][Rr][Nn]|[Aa][Uu][Xx]|[Nn][Uu][Ll]|[Cc][Oo][Mm][1-9]|[Ll][Pp][Tt][1-9])(?:[./]|(?![\\s\\S]))"
+      }
+    },
+    "target": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/path"
+        },
+        {
+          "not": {
+            "pattern": "(?:^|/)(?:\\.(?:[Gg][Ii][Tt]|[Hh][Gg]|[Ss][Vv][Nn]|[Jj][Jj]|[Ff][Rr][Ii][Ll][Aa][Dd][Dd](?:\\.[Jj][Ss][Oo][Nn])?)|[Ff][Rr][Ii][Ll][Aa][Dd][Dd]\\.[Ll][Oo][Cc][Kk]\\.[Jj][Ss][Oo][Nn])(?:/|(?![\\s\\S]))|(?:^|/)\\.[Ff][Rr][Ii][Ll][Aa][Dd][Dd]-"
+          }
+        }
+      ]
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,127}(?![\\s\\S])"
+    },
+    "providerId": {
+      "type": "string",
+      "pattern": "^(?:v1:[0-9a-f]{64}|v2:[a-z0-9][a-z0-9._-]{0,127})(?![\\s\\S])"
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}(?![\\s\\S])"
+    },
+    "version": {
+      "type": "string",
+      "minLength": 5,
+      "maxLength": 128
+    },
+    "locator": {
+      "type": "string",
+      "pattern": "^(?:https://|file://)[^?#]+(?![\\s\\S])",
+      "maxLength": 8192
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "declaredSource",
+        "resolvedSource",
+        "manifestSha256"
+      ],
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/providerId"
+        },
+        "declaredSource": {
+          "$ref": "#/$defs/locator"
+        },
+        "resolvedSource": {
+          "$ref": "#/$defs/locator"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "size"
+      ],
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 104857600
+        }
+      }
+    },
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "resolvedSource",
+        "declaredTarget",
+        "target",
+        "expectedSha256",
+        "installed"
+      ],
+      "properties": {
+        "source": {
+          "$ref": "#/$defs/path"
+        },
+        "resolvedSource": {
+          "$ref": "#/$defs/locator"
+        },
+        "declaredTarget": {
+          "$ref": "#/$defs/target"
+        },
+        "target": {
+          "$ref": "#/$defs/target"
+        },
+        "expectedSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "installed": {
+          "$ref": "#/$defs/content"
+        }
+      }
+    },
+    "dependency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "itemId",
+        "version",
+        "manifestSha256"
+      ],
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/providerId"
+        },
+        "itemId": {
+          "$ref": "#/$defs/id"
+        },
+        "version": {
+          "$ref": "#/$defs/version"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/digest"
+        }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "providerId",
+        "itemId",
+        "manifestSource",
+        "manifestSha256",
+        "dependencies",
+        "files"
+      ],
+      "properties": {
+        "providerId": {
+          "$ref": "#/$defs/providerId"
+        },
+        "itemId": {
+          "$ref": "#/$defs/id"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/version"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifestSource": {
+          "$ref": "#/$defs/locator"
+        },
+        "manifestSha256": {
+          "$ref": "#/$defs/digest"
+        },
+        "targetRoot": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/target"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/dependency"
+          },
+          "maxItems": 100000
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/file"
+          },
+          "maxItems": 100000,
+          "minItems": 1
+        }
+      }
+    }
+  }
+}
