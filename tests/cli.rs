@@ -23,6 +23,15 @@ fn run_in(directory: &Path, args: &[&str]) -> Output {
         .expect("run friladd")
 }
 
+fn run_with_config(directory: &Path, args: &[&str], config_dir: &Path) -> Output {
+    Command::new(binary())
+        .env("FRILADD_CONFIG_DIR", config_dir)
+        .current_dir(directory)
+        .args(args)
+        .output()
+        .expect("run friladd")
+}
+
 fn repo_path(relative: &str) -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(relative)
@@ -104,6 +113,10 @@ fn write_lock(project: &Path, targets: &[(&str, &[u8])]) {
 fn help_version_and_invalid_arguments_have_expected_exit_codes() {
     assert!(run(&["--help"]).status.success());
     assert!(String::from_utf8_lossy(&run(&["installed", "--help"]).stdout).contains("--json"));
+    assert!(
+        String::from_utf8_lossy(&run(&["search", "--help"]).stdout).contains("--all-registries")
+    );
+    assert!(String::from_utf8_lossy(&run(&["info", "--help"]).stdout).contains("--json"));
     assert!(String::from_utf8_lossy(&run(&["status", "--help"]).stdout).contains("--check"));
     assert!(
         String::from_utf8_lossy(&run(&["--version"]).stdout).contains(env!("CARGO_PKG_VERSION"))
@@ -119,6 +132,287 @@ fn help_version_and_invalid_arguments_have_expected_exit_codes() {
             .status
             .success()
     );
+}
+
+#[test]
+fn catalog_search_info_and_json_are_deterministic_read_only_and_provider_neutral() {
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let one = project.path().join("one.json");
+    let two = project.path().join("two.json");
+    let three = project.path().join("three.json");
+    let broken = project.path().join("broken.json");
+    let manifest = |registry: &str, description: &str| {
+        serde_json::json!({
+            "schemaVersion": 1,
+            "name": registry,
+            "items": [{
+                "name": "same",
+                "description": description,
+                "files": [{"source":"unavailable.bin", "target":"src/unavailable.bin", "sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]
+            }]
+        })
+    };
+    fs::write(
+        &one,
+        serde_json::to_vec(&manifest("one", "Needle from global")).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        &two,
+        serde_json::to_vec(&manifest("two", "Needle from project")).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        &three,
+        serde_json::to_vec(&manifest("three", "Needle \u{1b}[31mfrom another provider")).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        &broken,
+        serde_json::to_vec(&manifest("valid", "Not a match")).unwrap(),
+    )
+    .unwrap();
+    let project_config = serde_json::json!({"schemaVersion":1,"defaultRegistry":"shared","registries":{"shared":{"source":two}}});
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::to_vec(&project_config).unwrap(),
+    )
+    .unwrap();
+    let global_config = serde_json::json!({"schemaVersion":1,"defaultRegistry":"global","registries":{"shared":{"source":one},"global":{"source":three},"broken":{"source":broken}}});
+    fs::write(
+        global.path().join(".friladd.json"),
+        serde_json::to_vec(&global_config).unwrap(),
+    )
+    .unwrap();
+
+    let project_path = project.path().display().to_string();
+    let no_default_project = tempdir().unwrap();
+    let no_default_global = tempdir().unwrap();
+    let no_default = run_with_config(
+        no_default_project.path(),
+        &["search", "needle", "--json"],
+        no_default_global.path(),
+    );
+    assert_eq!(no_default.status.code(), Some(2));
+    assert!(no_default.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&no_default.stderr).contains("No default registry"));
+
+    let explicit_search = run_with_config(
+        project.path(),
+        &[
+            "search",
+            "project",
+            "--registry",
+            &two.display().to_string(),
+            "--json",
+        ],
+        global.path(),
+    );
+    assert!(explicit_search.status.success(), "{explicit_search:?}");
+    let explicit_json: serde_json::Value = serde_json::from_slice(&explicit_search.stdout).unwrap();
+    assert_eq!(explicit_json["data"]["items"][0]["registry"], "two");
+    let human_search = run_with_config(
+        project.path(),
+        &["search", "needle", "--all-registries"],
+        global.path(),
+    );
+    assert!(human_search.status.success());
+    assert!(String::from_utf8_lossy(&human_search.stdout).contains("two/same"));
+    assert!(!human_search.stdout.contains(&0x1b));
+    let human_info = run_with_config(
+        project.path(),
+        &["info", "same", "--registry", &two.display().to_string()],
+        global.path(),
+    );
+    assert!(human_info.status.success());
+    assert!(String::from_utf8_lossy(&human_info.stdout).contains("File: unavailable.bin"));
+
+    let all = run_with_config(
+        project.path(),
+        &[
+            "search",
+            "NEEDLE",
+            "--all-registries",
+            "--json",
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(all.status.code(), Some(0), "{all:?}");
+    assert!(all.stderr.is_empty());
+    let result: serde_json::Value = serde_json::from_slice(&all.stdout).unwrap();
+    assert_eq!(result["schemaVersion"], 1);
+    assert_eq!(result["command"], "search");
+    assert_eq!(result["data"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(result["data"]["items"][0]["provider"], "three");
+    assert_eq!(result["data"]["items"][1]["provider"], "two");
+    assert_eq!(result["data"]["items"][0]["id"], "same");
+
+    let default_search = run_with_config(
+        project.path(),
+        &["search", "project", "--json", "--project", &project_path],
+        global.path(),
+    );
+    assert!(default_search.status.success(), "{default_search:?}");
+    let default_json: serde_json::Value = serde_json::from_slice(&default_search.stdout).unwrap();
+    assert_eq!(default_json["data"]["items"][0]["registry"], "two");
+    let no_match = run_with_config(
+        project.path(),
+        &["search", "absent", "--json", "--project", &project_path],
+        global.path(),
+    );
+    assert!(no_match.status.success());
+    let no_match_json: serde_json::Value = serde_json::from_slice(&no_match.stdout).unwrap();
+    assert_eq!(no_match_json["data"]["items"].as_array().unwrap().len(), 0);
+
+    let info = run_with_config(
+        project.path(),
+        &["info", "shared/same", "--json", "--project", &project_path],
+        global.path(),
+    );
+    assert!(info.status.success(), "{info:?}");
+    let info_json: serde_json::Value = serde_json::from_slice(&info.stdout).unwrap();
+    assert_eq!(info_json["data"]["item"]["provider"], "two");
+    assert_eq!(
+        info_json["data"]["item"]["manifestSha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(
+        info_json["data"]["item"]["files"][0]["sha256"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
+
+    let empty_query = run_with_config(
+        project.path(),
+        &["search", "   ", "--project", &project_path],
+        global.path(),
+    );
+    assert_eq!(empty_query.status.code(), Some(2));
+    assert!(empty_query.stdout.is_empty());
+    let conflict = run_with_config(
+        project.path(),
+        &["search", "x", "--registry", "shared", "--all-registries"],
+        global.path(),
+    );
+    assert_eq!(conflict.status.code(), Some(2));
+    fs::write(&broken, b"not json").unwrap();
+    let unavailable = run_with_config(
+        project.path(),
+        &[
+            "search",
+            "x",
+            "--all-registries",
+            "--json",
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(unavailable.status.code(), Some(2));
+    assert!(unavailable.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&unavailable.stderr).contains("Registry 'broken' failed"));
+
+    let v2_path = repo_path("registry/examples/v2/assets/registry.json");
+    let v2_info = run_with_config(
+        project.path(),
+        &[
+            "info",
+            "triangle",
+            "--registry",
+            &v2_path,
+            "--json",
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert!(v2_info.status.success(), "{v2_info:?}");
+    let v2_json: serde_json::Value = serde_json::from_slice(&v2_info.stdout).unwrap();
+    assert_eq!(v2_json["data"]["item"]["kind"], "asset");
+    assert_eq!(v2_json["data"]["item"]["files"][0]["size"], 752);
+    assert!(v2_json["data"]["item"]["license"].is_object());
+
+    fs::write(
+        &broken,
+        serde_json::to_vec(&manifest("valid", "valid")).unwrap(),
+    )
+    .unwrap();
+    let listing = run_with_config(
+        project.path(),
+        &[
+            "list",
+            "--all-registries",
+            "--json",
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert!(listing.status.success(), "{listing:?}");
+    let listing_json: serde_json::Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert_eq!(listing_json["data"]["items"].as_array().unwrap().len(), 3);
+    let before_entries = fs::read_dir(project.path()).unwrap().count();
+    fs::write(&broken, b"not json").unwrap();
+    let listing = run_with_config(
+        project.path(),
+        &[
+            "list",
+            "--all-registries",
+            "--json",
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(listing.status.code(), Some(2)); // fail all: the configured broken registry is visible
+    assert!(listing.stdout.is_empty());
+    assert_eq!(
+        fs::read_dir(project.path()).unwrap().count(),
+        before_entries
+    );
+    assert!(!project.path().join("friladd.lock.json").exists());
+}
+
+#[test]
+fn all_registry_catalog_is_bounded_before_loading_manifests() {
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let mut registries = serde_json::Map::new();
+    for index in 0..65 {
+        registries.insert(
+            format!("r{index:02}"),
+            serde_json::json!({"source": project.path().join("missing.json")}),
+        );
+    }
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"registries":registries}))
+            .unwrap(),
+    )
+    .unwrap();
+    let project_path = project.path().display().to_string();
+    let output = run_with_config(
+        project.path(),
+        &[
+            "list",
+            "--all-registries",
+            "--json",
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("limited to 64"));
 }
 
 #[test]
