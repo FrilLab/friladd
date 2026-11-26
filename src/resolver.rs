@@ -6,6 +6,11 @@ pub struct Resolution<'a> {
     pub item: &'a str,
 }
 
+pub struct RegistrySelection {
+    pub manifest: String,
+    pub alias: Option<String>,
+}
+
 pub fn resolve_add<'a>(
     component: &'a str,
     explicit: Option<&str>,
@@ -36,7 +41,16 @@ pub fn resolve_list(
     project: &Path,
     global: &Path,
 ) -> Result<String, String> {
-    resolve_registry(explicit, alias, project, global)?.ok_or_else(|| {
+    Ok(resolve_list_selection(explicit, alias, project, global)?.manifest)
+}
+
+pub fn resolve_list_selection(
+    explicit: Option<&str>,
+    alias: Option<&str>,
+    project: &Path,
+    global: &Path,
+) -> Result<RegistrySelection, String> {
+    resolve_registry_selection(explicit, alias, project, global)?.ok_or_else(|| {
         "No default registry is configured. Use 'friladd registry list' to inspect registered registries.".into()
     })
 }
@@ -47,10 +61,25 @@ fn resolve_registry(
     project: &Path,
     global: &Path,
 ) -> Result<Option<String>, String> {
+    Ok(
+        resolve_registry_selection(explicit, alias, project, global)?
+            .map(|selection| selection.manifest),
+    )
+}
+
+fn resolve_registry_selection(
+    explicit: Option<&str>,
+    alias: Option<&str>,
+    project: &Path,
+    global: &Path,
+) -> Result<Option<RegistrySelection>, String> {
     if let Some(location) = explicit
         && !registered_alias_location(location)
     {
-        return Ok(Some(location.into()));
+        return Ok(Some(RegistrySelection {
+            manifest: location.into(),
+            alias: None,
+        }));
     }
     let project_config = config::load(project)?;
     let global_config = config::load(global)?;
@@ -59,14 +88,24 @@ fn resolve_registry(
         config::validate_alias(alias)?;
         for (config, path) in scopes {
             if config.registries.contains_key(alias) {
-                return source_for(config, alias, path).map(Some);
+                return source_for(config, alias, path).map(|manifest| {
+                    Some(RegistrySelection {
+                        manifest,
+                        alias: Some(alias.into()),
+                    })
+                });
             }
         }
         return Err(format!("Registry alias '{alias}' is not registered"));
     }
     for (config, path) in scopes {
         if let Some(alias) = config.default_registry.as_deref() {
-            return source_for(config, alias, path).map(Some);
+            return source_for(config, alias, path).map(|manifest| {
+                Some(RegistrySelection {
+                    manifest,
+                    alias: Some(alias.into()),
+                })
+            });
         }
     }
     Ok(None)

@@ -179,7 +179,7 @@ fn catalog_search_info_and_json_are_deterministic_read_only_and_provider_neutral
         serde_json::to_vec(&project_config).unwrap(),
     )
     .unwrap();
-    let global_config = serde_json::json!({"schemaVersion":1,"defaultRegistry":"global","registries":{"shared":{"source":one},"global":{"source":three},"broken":{"source":broken}}});
+    let global_config = serde_json::json!({"schemaVersion":1,"defaultRegistry":"global","registries":{"shared":{"source":one},"global":{"source":three},"selected":{"source":broken},"broken":{"source":broken}}});
     fs::write(
         global.path().join(".friladd.json"),
         serde_json::to_vec(&global_config).unwrap(),
@@ -258,6 +258,24 @@ fn catalog_search_info_and_json_are_deterministic_read_only_and_provider_neutral
     assert!(default_search.status.success(), "{default_search:?}");
     let default_json: serde_json::Value = serde_json::from_slice(&default_search.stdout).unwrap();
     assert_eq!(default_json["data"]["items"][0]["registry"], "two");
+    let default_list = run_with_config(
+        project.path(),
+        &["list", "--json", "--project", &project_path],
+        global.path(),
+    );
+    assert!(default_list.status.success(), "{default_list:?}");
+    let default_list_json: serde_json::Value =
+        serde_json::from_slice(&default_list.stdout).unwrap();
+    assert_eq!(default_list_json["data"]["items"][0]["alias"], "shared");
+    let selected_list = run_with_config(
+        project.path(),
+        &["list", "selected", "--json", "--project", &project_path],
+        global.path(),
+    );
+    assert!(selected_list.status.success(), "{selected_list:?}");
+    let selected_list_json: serde_json::Value =
+        serde_json::from_slice(&selected_list.stdout).unwrap();
+    assert_eq!(selected_list_json["data"]["items"][0]["alias"], "selected");
     let no_match = run_with_config(
         project.path(),
         &["search", "absent", "--json", "--project", &project_path],
@@ -358,7 +376,14 @@ fn catalog_search_info_and_json_are_deterministic_read_only_and_provider_neutral
     );
     assert!(listing.status.success(), "{listing:?}");
     let listing_json: serde_json::Value = serde_json::from_slice(&listing.stdout).unwrap();
-    assert_eq!(listing_json["data"]["items"].as_array().unwrap().len(), 3);
+    assert_eq!(listing_json["data"]["items"].as_array().unwrap().len(), 4);
+    assert!(
+        listing_json["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["alias"] == "selected")
+    );
     let before_entries = fs::read_dir(project.path()).unwrap().count();
     fs::write(&broken, b"not json").unwrap();
     let listing = run_with_config(

@@ -341,7 +341,7 @@ fn list(args: ListArgs) -> Result<(), String> {
         for (alias, location) in registries {
             let loaded = registry::load_registry(&location)
                 .map_err(|error| format!("Registry '{alias}' failed: {error}"))?;
-            items.extend(list_item_json(&loaded, &alias));
+            items.extend(list_item_json(&loaded, Some(&alias)));
         }
         items.sort_by(|a, b| {
             (a["provider"].as_str(), a["id"].as_str())
@@ -354,14 +354,14 @@ fn list(args: ListArgs) -> Result<(), String> {
         }
         return Ok(());
     }
-    let location = resolver::resolve_list(
+    let selection = resolver::resolve_list_selection(
         args.registry.as_deref(),
         args.registry_alias.as_deref(),
         &project,
         &global,
     )?;
-    let loaded = registry::load_registry(&location)?;
-    let mut items = list_item_json(&loaded, "default");
+    let loaded = registry::load_registry(&selection.manifest)?;
+    let mut items = list_item_json(&loaded, selection.alias.as_deref());
     items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     if args.json {
         print_catalog_json(
@@ -389,37 +389,53 @@ fn search(args: SearchArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
     let registries = if args.all_registries {
         load_effective_registries(&project, &global)?
+            .into_iter()
+            .map(|(alias, location)| (Some(alias), location))
+            .collect::<Vec<_>>()
     } else {
-        vec![(
-            "selected".into(),
-            resolver::resolve_list(args.registry.as_deref(), None, &project, &global)?,
-        )]
+        {
+            let selection = resolver::resolve_list_selection(
+                args.registry.as_deref(),
+                None,
+                &project,
+                &global,
+            )?;
+            vec![(selection.alias, selection.manifest)]
+        }
     };
     let query = args.query.to_lowercase();
     let mut items = Vec::new();
     for (alias, location) in registries {
-        let loaded = registry::load_registry(&location)
-            .map_err(|error| format!("Registry '{alias}' failed: {error}"))?;
-        items.extend(list_item_json(&loaded, &alias).into_iter().filter(|item| {
-            let text = [
-                item["id"].as_str().unwrap_or_default(),
-                item["name"].as_str().unwrap_or_default(),
-                item["description"].as_str().unwrap_or_default(),
-                item["kind"].as_str().unwrap_or_default(),
-            ]
-            .into_iter()
-            .chain(
-                item["tags"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|tag| tag.as_str()),
+        let loaded = registry::load_registry(&location).map_err(|error| {
+            format!(
+                "Registry '{}' failed: {error}",
+                alias.as_deref().unwrap_or("selected registry")
             )
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase();
-            text.contains(&query)
-        }));
+        })?;
+        items.extend(
+            list_item_json(&loaded, alias.as_deref())
+                .into_iter()
+                .filter(|item| {
+                    let text = [
+                        item["id"].as_str().unwrap_or_default(),
+                        item["name"].as_str().unwrap_or_default(),
+                        item["description"].as_str().unwrap_or_default(),
+                        item["kind"].as_str().unwrap_or_default(),
+                    ]
+                    .into_iter()
+                    .chain(
+                        item["tags"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|tag| tag.as_str()),
+                    )
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_lowercase();
+                    text.contains(&query)
+                }),
+        );
     }
     items.sort_by(|a, b| {
         (a["provider"].as_str(), a["id"].as_str()).cmp(&(b["provider"].as_str(), b["id"].as_str()))
@@ -518,10 +534,13 @@ fn info(args: InfoArgs) -> Result<(), String> {
     }
     Ok(())
 }
-fn list_item_json(loaded: &registry::LoadedRegistry, alias: &str) -> Vec<serde_json::Value> {
+fn list_item_json(
+    loaded: &registry::LoadedRegistry,
+    alias: Option<&str>,
+) -> Vec<serde_json::Value> {
     loaded.registry.items.iter().map(|item| {
         let mut value = serde_json::json!({"provider": loaded.v2.as_ref().map(|v2| v2.id.as_str()).unwrap_or(loaded.registry.name.as_str()), "registry": loaded.registry.name, "id": item.name, "name": item.name, "description": item.description});
-        if alias != "selected" { value["alias"] = serde_json::json!(alias); }
+        if let Some(alias) = alias { value["alias"] = serde_json::json!(alias); }
         if let Some(meta) = loaded.v2.as_ref().and_then(|v2| v2.items.iter().find(|entry| entry.id == item.name)) {
             value["version"] = serde_json::json!(meta.version); value["kind"] = serde_json::json!(meta.kind); value["tags"] = serde_json::json!(meta.tags);
         }
