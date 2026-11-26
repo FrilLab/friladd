@@ -198,6 +198,9 @@ fn list(args: ListArgs) -> Result<(), String> {
 fn add(args: AddArgs) -> Result<(), String> {
     let (project_config, global) = roots(args.project.clone())?;
     let project_root = project_config.parent().unwrap().to_path_buf();
+    if !args.dry_run {
+        transaction::recover(&project_root)?;
+    }
     let resolution = resolver::resolve_add(
         &args.component,
         args.registry.as_deref(),
@@ -323,9 +326,16 @@ fn add(args: AddArgs) -> Result<(), String> {
     if let Some(existing) = same.as_ref() {
         let mut comparable = new_item.clone();
         if comparable.files.len() == existing.files.len() {
-            for (candidate, installed) in comparable.files.iter_mut().zip(&existing.files) {
-                candidate.installed = installed.installed.clone();
+            for candidate in &mut comparable.files {
+                if let Some(installed) = existing
+                    .files
+                    .iter()
+                    .find(|record| record.target == candidate.target)
+                {
+                    candidate.installed = installed.installed.clone();
+                }
             }
+            comparable.files.sort_by(|a, b| a.target.cmp(&b.target));
         }
         if existing == &comparable {
             let unchanged = existing.files.iter().all(|file| {

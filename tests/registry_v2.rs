@@ -266,4 +266,11 @@ fn cli_reads_provider_fixtures_and_verifies_sizes() {
             .is_file()
     );
     assert_eq!(fs::read_dir(project.path()).unwrap().count(), 4);
+    let lock = fs::read(project.path().join("friladd.lock.json")).unwrap();
+    let repeated = run(&["add", "fixture/triangle"]);
+    assert_eq!(repeated.status.code(), Some(0), "{repeated:?}");
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        lock
+    );
 }
