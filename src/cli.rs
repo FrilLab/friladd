@@ -187,7 +187,11 @@ fn list(args: ListArgs) -> Result<(), String> {
     let mut items: Vec<_> = loaded.registry.items.iter().collect();
     items.sort_unstable_by_key(|item| &item.name);
     for item in items {
-        println!("- {}: {}", item.name, item.description);
+        if loaded.v2.is_some() && item.description.is_empty() {
+            println!("- {}", item.name);
+        } else {
+            println!("- {}: {}", item.name, item.description);
+        }
     }
     Ok(())
 }
@@ -201,6 +205,9 @@ fn add(args: AddArgs) -> Result<(), String> {
         &global,
     )?;
     let loaded = registry::load_registry(&resolution.manifest)?;
+    if loaded.v2.is_some() {
+        return Err("Registry v2 installation requires managed add. Use list or registry verify to inspect this snapshot.".into());
+    }
     let item = loaded
         .registry
         .find(resolution.item)
@@ -233,13 +240,20 @@ fn verify_registry(args: ListArgs) -> Result<(), String> {
         &global,
     )?;
     let loaded = registry::load_registry(&location)?;
-    let count = downloader::verify_registry_files(&loaded.source, &loaded.registry)?;
+    let count = if let Some(v2) = &loaded.v2 {
+        downloader::verify_v2_files(&loaded.source, v2)?
+    } else {
+        downloader::verify_registry_files(&loaded.source, &loaded.registry)?
+    };
     println!(
         "Verified registry {}: {} item(s), {} file(s).",
         loaded.registry.name,
         loaded.registry.items.len(),
         count
     );
+    if loaded.v2.is_some() {
+        println!("Manifest SHA-256: {}", loaded.manifest_sha256);
+    }
     Ok(())
 }
 fn manage(command: RegistryCommand) -> Result<(), String> {

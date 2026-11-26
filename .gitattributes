@@ -1,3 +1,8 @@
 # Registry fixtures are SHA-256-addressed test data; never rewrite bytes on checkout.
 # -text preserves the checked-in bytes for text and binary fixtures on every OS.
 registry/fixtures/** -text
+
+# Registry v2 authoring fixtures have byte-level digests.
+registry/examples/v2/** -text
+registry/examples/v2/**/*.glb binary
+registry/examples/v2/**/*.png binary

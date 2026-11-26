@@ -67,6 +67,32 @@ pub fn verify_registry_files(
     Ok(count)
 }
 
+pub fn verify_v2_files(
+    source: &RegistrySource,
+    registry: &crate::registry_v2::RegistryV2,
+) -> Result<usize, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut count = 0;
+    for item in &registry.items {
+        for file in &item.files {
+            if seen.insert(&file.source) {
+                let bytes =
+                    acquire_file_with_policy(source, &file.source, &file.sha256, None, false)?;
+                if bytes.len() as u64 != file.size {
+                    return Err(format!(
+                        "Size mismatch for {}: expected {}, got {}",
+                        file.source,
+                        file.size,
+                        bytes.len()
+                    ));
+                }
+            }
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn check_repeated_digest(source: &str, previous: &str, expected: &str) -> Result<(), String> {
     if previous.eq_ignore_ascii_case(expected) {
         Ok(())
@@ -80,6 +106,16 @@ fn acquire_file(
     file_source: &str,
     expected_sha256: &str,
     test_root: Option<Certificate>,
+) -> Result<Vec<u8>, String> {
+    acquire_file_with_policy(source, file_source, expected_sha256, test_root, true)
+}
+
+fn acquire_file_with_policy(
+    source: &RegistrySource,
+    file_source: &str,
+    expected_sha256: &str,
+    test_root: Option<Certificate>,
+    allow_suffix: bool,
 ) -> Result<Vec<u8>, String> {
     let bytes = match source {
         RegistrySource::Local { root } => read_local_source(root, file_source)?,
@@ -96,11 +132,13 @@ fn acquire_file(
                     "Registry source escaped its HTTPS origin: {file_source}"
                 ));
             }
-            fetch_url_with_root(
+            fetch_url_with_policy(
                 &url,
                 MAX_FILE_BYTES,
                 &format!("file {file_source}"),
                 test_root,
+                REQUEST_TIMEOUT,
+                allow_suffix,
             )?
             .0
         }
@@ -153,20 +191,22 @@ fn fetch_url_with_root(
     label: &str,
     test_root: Option<Certificate>,
 ) -> Result<(Vec<u8>, Url), String> {
-    fetch_url_with_timeout(url, max_bytes, label, test_root, REQUEST_TIMEOUT)
+    fetch_url_with_policy(url, max_bytes, label, test_root, REQUEST_TIMEOUT, true)
 }
 
-fn fetch_url_with_timeout(
+fn fetch_url_with_policy(
     url: &Url,
     max_bytes: usize,
     label: &str,
     test_root: Option<Certificate>,
     request_timeout: Duration,
+    allow_suffix: bool,
 ) -> Result<(Vec<u8>, Url), String> {
     if url.scheme() != "https"
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
+        || (!allow_suffix && (url.query().is_some() || url.fragment().is_some()))
     {
         return Err(format!(
             "{label} must use HTTPS without embedded credentials"
@@ -179,6 +219,8 @@ fn fetch_url_with_timeout(
             || attempt.url().origin() != origin
             || !attempt.url().username().is_empty()
             || attempt.url().password().is_some()
+            || (!allow_suffix
+                && (attempt.url().query().is_some() || attempt.url().fragment().is_some()))
         {
             attempt.error("HTTPS redirect exceeded limit or violated same-origin policy")
         } else {
@@ -497,6 +539,21 @@ mod tests {
     }
 
     #[test]
+    fn rejects_query_suffixes_on_v2_artifact_redirects() {
+        let (url, root, handle) = https_fixture(
+            "302 Found",
+            0,
+            "Location: /file?signature=private-value\r\n",
+            b"",
+        );
+        let error = fetch_url_with_policy(&url, 20, "fixture", Some(root), REQUEST_TIMEOUT, false)
+            .unwrap_err();
+        handle.join().unwrap();
+        assert!(error.contains("redirect rejected"), "{error}");
+        assert!(!error.contains("private-value"), "{error}");
+    }
+
+    #[test]
     fn times_out_when_the_https_peer_stops_responding() {
         let listener = TcpListener::bind("localhost:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -509,7 +566,8 @@ mod tests {
             "https://localhost:{port}/registry?token=query-secret"
         ))
         .unwrap();
-        let result = fetch_url_with_timeout(&url, 20, "fixture", None, Duration::from_millis(500));
+        let result =
+            fetch_url_with_policy(&url, 20, "fixture", None, Duration::from_millis(500), true);
         release.send(()).unwrap();
         handle.join().unwrap();
         let error = result.unwrap_err();

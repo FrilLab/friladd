@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 2,
+  "id": "example.assets",
+  "name": "asset-example",
+  "items": [
+    {
+      "id": "triangle",
+      "version": "1.0.0",
+      "kind": "asset",
+      "description": "Generated triangle with an external texture.",
+      "tags": [
+        "model",
+        "example"
+      ],
+      "license": {
+        "id": "CC0-1.0",
+        "notice": "triangle/NOTICE.txt"
+      },
+      "files": [
+        {
+          "source": "triangle/model.glb",
+          "target": "public/models/triangle/model.glb",
+          "sha256": "be130410b12a591da966a29ce8bc7457d2741ed8082eacc57bd192b4a60af009",
+          "size": 752
+        },
+        {
+          "source": "triangle/textures/albedo.png",
+          "target": "public/models/triangle/textures/albedo.png",
+          "sha256": "2f7efd34151543accd71604aded990ee86943b50164c1138373fcd0bba59362c",
+          "size": 69
+        },
+        {
+          "source": "triangle/NOTICE.txt",
+          "target": "public/models/triangle/NOTICE.txt",
+          "sha256": "c633b9154b87948d92dd6b5ec288b1104c93c6d847c20c88990a9d9459a87e46",
+          "size": 97
+        }
+      ]
+    }
+  ]
+}

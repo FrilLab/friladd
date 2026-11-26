@@ -744,7 +744,7 @@ fn malformed_registry_and_unsafe_targets_never_write_even_during_install() {
     for (contents, expected) in [
         ("{", "Invalid registry manifest"),
         (
-            r#"{"schemaVersion":2,"name":"test","items":[]}"#,
+            r#"{"schemaVersion":99,"name":"test","items":[]}"#,
             "Unsupported",
         ),
         (

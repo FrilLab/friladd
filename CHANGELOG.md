@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Add the validated lock v1 and crash-recoverable transaction foundation for upcoming managed lifecycle commands.
+- Read and verify versioned Registry v2 manifests, including file sizes, resource metadata, and exact dependency declarations.
 
 - Add registry verification for source and binary bytes without installing files.
 - Support explicit project scope across registry management and reject ambiguous selector or scope flags.
