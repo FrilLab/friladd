@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased — 0.2.x public directory contracts
+
+- Specify a strict static public directory schema, reserved official namespaces, immutable review provenance, suspension/replacement rules, CLI precedence, and identity-scoped community consent for issues #39–#43. This is contract documentation only: no public discovery command or live endpoint is shipped in this revision.
+- Record the canonical endpoint, deployment, transport enforcement, and real provider admission as outstanding prerequisites; no example fixture is production bootstrap data.
+
 ## 0.2.0
 
 - Expose `fril` as the primary Cargo, native release, and npm command while preserving the `friladd` executable alias and version output. Both aliases share the same CLI and project state; the npm tarball continues to contain one platform binary.
