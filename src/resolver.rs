@@ -1,6 +1,8 @@
 use crate::{config, config::Config};
 use std::path::{Path, PathBuf};
 
+pub const MAX_EFFECTIVE_REGISTRIES: usize = 64;
+
 pub struct Resolution<'a> {
     pub manifest: String,
     pub item: &'a str,
@@ -9,6 +11,55 @@ pub struct Resolution<'a> {
 pub struct RegistrySelection {
     pub manifest: String,
     pub alias: Option<String>,
+}
+
+/// Resolve configured aliases in deterministic order, with project entries shadowing globals.
+pub fn effective_registries(
+    project: &Path,
+    global: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let project_config = config::load(project)?;
+    let global_config = config::load(global)?;
+    let mut sources = std::collections::BTreeMap::new();
+    for (alias, entry) in global_config.registries {
+        sources.insert(
+            alias,
+            (
+                entry.source,
+                global.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            ),
+        );
+    }
+    for (alias, entry) in project_config.registries {
+        sources.insert(
+            alias,
+            (
+                entry.source,
+                project.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            ),
+        );
+    }
+    if sources.len() > MAX_EFFECTIVE_REGISTRIES {
+        return Err(format!(
+            "Multi-registry operation is limited to {MAX_EFFECTIVE_REGISTRIES} effective registries"
+        ));
+    }
+    sources
+        .into_iter()
+        .map(|(alias, (source, base))| {
+            let path = if source.contains("://") || Path::new(&source).is_absolute() {
+                PathBuf::from(&source)
+            } else {
+                base.join(source)
+            };
+            Ok((
+                alias,
+                path.into_os_string()
+                    .into_string()
+                    .map_err(|_| "Registry path is not UTF-8")?,
+            ))
+        })
+        .collect()
 }
 
 pub fn resolve_add<'a>(

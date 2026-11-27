@@ -5,11 +5,90 @@
   "required": ["schemaVersion", "command", "data"],
   "properties": {
     "schemaVersion": { "const": 1 },
-    "command": { "enum": ["add", "installed", "status", "update", "remove", "restore", "list", "search", "info"] },
+    "command": { "enum": ["add", "installed", "status", "update", "remove", "restore", "list", "search", "info", "doctor", "registry list", "registry verify"] },
     "data": { "type": "object" }
   },
   "additionalProperties": false,
   "allOf": [
+    {
+      "if": { "properties": { "command": { "const": "registry list" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["registries"],
+            "properties": {
+              "registries": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["alias", "source", "scope", "default"],
+                  "properties": {
+                    "alias": { "type": "string", "minLength": 1 },
+                    "source": { "type": "string", "minLength": 1 },
+                    "scope": { "enum": ["project", "global"] },
+                    "default": { "type": "boolean" }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "command": { "const": "registry verify" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["registry", "manifestSha256", "itemCount", "fileCount"],
+            "properties": {
+              "registry": { "type": "string", "minLength": 1 },
+              "manifestSha256": { "$ref": "#/$defs/digest" },
+              "itemCount": { "type": "integer", "minimum": 0 },
+              "fileCount": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "command": { "const": "doctor" } } },
+      "then": {
+        "properties": {
+          "data": {
+            "type": "object",
+            "required": ["project", "version", "platform", "defaultRegistry", "packageManagers", "managed", "summary", "checks", "transactionPending"],
+            "properties": {
+              "project": { "type": ["string", "null"] },
+              "version": { "type": "string" },
+              "platform": { "type": "object", "required": ["os", "arch"], "properties": { "os": { "type": "string" }, "arch": { "type": "string" } }, "additionalProperties": false },
+              "defaultRegistry": { "type": ["string", "null"] },
+              "packageManagers": { "type": "array", "items": { "enum": ["npm", "pnpm", "yarn", "bun"] } },
+              "managed": { "type": "object", "required": ["itemCount", "fileCount", "fileStates"], "properties": { "itemCount": { "type": "integer", "minimum": 0 }, "fileCount": { "type": "integer", "minimum": 0 }, "fileStates": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } } }, "additionalProperties": false },
+              "summary": {
+                "type": "object",
+                "required": ["ok", "warn", "fail", "skip"],
+                "properties": {
+                  "ok": { "type": "integer", "minimum": 0 },
+                  "warn": { "type": "integer", "minimum": 0 },
+                  "fail": { "type": "integer", "minimum": 0 },
+                  "skip": { "type": "integer", "minimum": 0 }
+                },
+                "additionalProperties": false
+              },
+              "checks": { "type": "array", "items": { "$ref": "#/$defs/doctorCheck" } },
+              "transactionPending": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        }
+      }
+    },
     {
       "if": { "properties": { "command": { "enum": ["list", "search"] } } },
       "then": {
@@ -125,6 +204,17 @@
     }
   ],
   "$defs": {
+    "doctorCheck": {
+      "type": "object",
+      "required": ["code", "state", "message", "action"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "state": { "enum": ["ok", "warn", "fail", "skip"] },
+        "message": { "type": "string" },
+        "action": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
     "catalogItem": {
       "type": "object",
       "required": ["provider", "id", "name", "description"],

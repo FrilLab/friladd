@@ -43,11 +43,11 @@ The final command writes two files under `/tmp/friladd-consumer/src/components/e
 friladd --help
 friladd --version
 friladd registry add <alias> <path-or-https-url> [--global | --project <directory>] [--default]
-friladd registry list [--global | --project <directory>]
+friladd registry list [--global | --project <directory>] [--json]
 friladd registry default <alias> [--global | --project <directory>]
 friladd registry remove <alias> [--global | --project <directory>]
-friladd registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
-friladd list [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
+friladd registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>] [--json]
+friladd list [<registry-alias> | --registry <alias-or-source> | --all-registries] [--project <directory>] [--json]
 friladd search <query> [--registry <alias-or-source> | --all-registries] [--project <directory>] [--json]
 friladd info <item-or-registry/item> [--registry <alias-or-source>] [--project <directory>] [--json]
 friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run] [--json]
@@ -56,6 +56,7 @@ friladd status [<item-or-registry/item>] [--project <directory>] [--json] [--che
 friladd update <item-or-registry/item> --registry <alias-or-source> [--version <exact-v2-version>] [--allow-downgrade] [--project <directory>] [--dry-run] [--json]
 friladd remove <item-or-registry/item> [--project <directory>] [--dry-run] [--json]
 friladd restore [<item-or-registry/item>] [--project <directory>] [--dry-run] [--json]
+friladd doctor [--project <directory>] [--json] [--online]
 ```
 
 For legacy commands, `--registry` remains supported. Explicit local paths resolve from the current directory. A registry stored in project `.friladd.json` resolves local paths from that file's directory; a local source registered globally is normalized to an absolute path. Remote registries must use HTTPS; file sources are resolved against the manifest directory or final manifest URL and stay on the same HTTPS origin. See the [CLI contract](docs/cli-contract.md), [security model](docs/security-model.md), and [lock and recovery reference](docs/lock-and-recovery.md) for managed ownership and recovery behavior.
@@ -123,6 +124,10 @@ The URL above is illustrative; FrilAdd contains no built-in FrilCraft URL or pro
 friladd registry verify --registry ./registry.json
 friladd registry verify frilcraft
 ```
+
+Providers should run this command in their publication CI after reviewing the manifest and asset bytes. See the [provider validation workflow](docs/provider-validation.md) for native and packed npm examples.
+
+`friladd doctor` diagnoses project configuration and managed-file state without network access by default. `--online` checks configured registry manifests only. It never repairs files or runs package managers. Missing package manager lockfiles are warnings; the native CLI itself does not require Node.js.
 
 The installer and verifier preserve exact bytes, including binary data such as GLB models, PNG textures, and audio. Registry v1 retains its 10 MiB per-file cap; Registry v2 streams files up to 100 MiB and caps each operation at 512 MiB. Acquisition hashes and counts bytes incrementally into temporary staging files before the transaction can write project destinations. Verification uses the same streaming path and removes temporary files. These limits do not validate model, image, or audio formats. Publish only reviewed assets with appropriate license notices.
 

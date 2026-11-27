@@ -8,8 +8,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const MAX_CATALOG_REGISTRIES: usize = 64;
-
 #[derive(Debug, Parser)]
 #[command(
     name = "friladd",
@@ -32,6 +30,9 @@ enum Command {
     /// Show metadata for one item.
     #[command(after_help = "Example: friladd info team-ui/button --json")]
     Info(InfoArgs),
+    /// Diagnose project distribution state.
+    #[command(after_help = "Example: friladd doctor --project ./app --json")]
+    Doctor(DoctorArgs),
     /// Install one item from a registry.
     #[command(after_help = "Example: friladd add local/sample --project ./app --dry-run")]
     Add(AddArgs),
@@ -180,6 +181,21 @@ struct RegistryVerifyArgs {
     registry: Option<String>,
     #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    /// Project root (defaults to the current directory).
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    /// Check configured registry manifests with bounded requests.
+    #[arg(long)]
+    online: bool,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, Args)]
 struct InfoArgs {
@@ -239,6 +255,9 @@ enum RegistryCommand {
         global: bool,
         #[arg(long)]
         project: Option<PathBuf>,
+        /// Emit versioned JSON output.
+        #[arg(long)]
+        json: bool,
     },
     /// Unregister an alias from the selected scope.
     #[command(after_help = "Example: friladd registry remove local")]
@@ -269,6 +288,7 @@ pub fn run() -> Result<(), String> {
         Command::List(a) => list(a),
         Command::Search(a) => search(a),
         Command::Info(a) => info(a),
+        Command::Doctor(a) => doctor(a),
         Command::Add(a) => add(a),
         Command::Installed(a) => installed(a),
         Command::Status(a) => status(a),
@@ -336,7 +356,7 @@ fn project_config_path(project: Option<PathBuf>) -> Result<PathBuf, String> {
 fn list(args: ListArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
     if args.all_registries {
-        let registries = load_effective_registries(&project, &global)?;
+        let registries = resolver::effective_registries(&project, &global)?;
         let mut items = Vec::new();
         for (alias, location) in registries {
             let loaded = registry::load_registry(&location)
@@ -388,7 +408,7 @@ fn search(args: SearchArgs) -> Result<(), String> {
     }
     let (project, global) = roots(args.project)?;
     let registries = if args.all_registries {
-        load_effective_registries(&project, &global)?
+        resolver::effective_registries(&project, &global)?
             .into_iter()
             .map(|(alias, location)| (Some(alias), location))
             .collect::<Vec<_>>()
@@ -574,52 +594,6 @@ fn terminal_safe(value: &str) -> String {
             }
         })
         .collect()
-}
-fn load_effective_registries(
-    project: &Path,
-    global: &Path,
-) -> Result<Vec<(String, String)>, String> {
-    let project_config = config::load(project)?;
-    let global_config = config::load(global)?;
-    let mut sources = std::collections::BTreeMap::new();
-    for (alias, entry) in global_config.registries {
-        sources.insert(
-            alias,
-            (
-                entry.source,
-                global.parent().unwrap_or(Path::new(".")).to_path_buf(),
-            ),
-        );
-    }
-    for (alias, entry) in project_config.registries {
-        sources.insert(
-            alias,
-            (
-                entry.source,
-                project.parent().unwrap_or(Path::new(".")).to_path_buf(),
-            ),
-        );
-    }
-    let mut out = Vec::new();
-    if sources.len() > MAX_CATALOG_REGISTRIES {
-        return Err(format!(
-            "Catalog operation is limited to {MAX_CATALOG_REGISTRIES} effective registries"
-        ));
-    }
-    for (alias, (source, base)) in sources {
-        let path = if source.contains("://") || Path::new(&source).is_absolute() {
-            PathBuf::from(&source)
-        } else {
-            base.join(source)
-        };
-        out.push((
-            alias,
-            path.into_os_string()
-                .into_string()
-                .map_err(|_| "Registry path is not UTF-8")?,
-        ));
-    }
-    Ok(out)
 }
 fn add(args: AddArgs) -> Result<(), String> {
     let (project_config, global) = roots(args.project.clone())?;
@@ -1858,6 +1832,19 @@ fn print_mutation_result(command: &str, dry_run: bool, items: Vec<serde_json::Va
     }
 }
 
+fn doctor(args: DoctorArgs) -> Result<(), String> {
+    let report = crate::doctor::inspect(args.project, args.online)?;
+    if args.json {
+        print_catalog_json("doctor", report.data);
+    } else {
+        crate::doctor::print_human(&report.data);
+    }
+    if report.failed {
+        Err("Doctor found failed required checks; see the diagnostic report.".into())
+    } else {
+        Ok(())
+    }
+}
 fn verify_registry(args: RegistryVerifyArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
     let location = resolver::resolve_list(
@@ -1872,14 +1859,26 @@ fn verify_registry(args: RegistryVerifyArgs) -> Result<(), String> {
     } else {
         downloader::verify_registry_files(&loaded.source, &loaded.registry)?
     };
-    println!(
-        "Verified registry {}: {} item(s), {} file(s).",
-        loaded.registry.name,
-        loaded.registry.items.len(),
-        count
-    );
-    if loaded.v2.is_some() {
-        println!("Manifest SHA-256: {}", loaded.manifest_sha256);
+    if args.json {
+        print_catalog_json(
+            "registry verify",
+            serde_json::json!({
+                "registry": loaded.registry.name,
+                "manifestSha256": loaded.manifest_sha256,
+                "itemCount": loaded.registry.items.len(),
+                "fileCount": count,
+            }),
+        );
+    } else {
+        println!(
+            "Verified registry {}: {} item(s), {} file(s).",
+            loaded.registry.name,
+            loaded.registry.items.len(),
+            count
+        );
+        if loaded.v2.is_some() {
+            println!("Manifest SHA-256: {}", loaded.manifest_sha256);
+        }
     }
     Ok(())
 }
@@ -1944,29 +1943,51 @@ fn manage(command: RegistryCommand) -> Result<(), String> {
         RegistryCommand::List {
             global,
             project: project_arg,
+            json,
         } => {
+            let mut entries = Vec::new();
             if global {
                 let gp = config::global_path()?;
                 let gc = config::load(&gp)?;
-                print_registry_entries(&gc, "global");
+                if json {
+                    entries.extend(registry_entries_json(&gc, "global"));
+                } else {
+                    print_registry_entries(&gc, "global");
+                }
             } else {
                 let (pp, gp) = roots(project_arg)?;
                 let pc = config::load(&pp)?;
                 let gc = config::load(&gp)?;
-                print_registry_entries(&pc, "project");
-                for (a, e) in &gc.registries {
-                    if !pc.registries.contains_key(a) {
-                        println!(
-                            "{a}\t{}\tglobal{}",
-                            registry::display_location(&e.source),
-                            if gc.default_registry.as_deref() == Some(a) {
-                                "\tdefault"
-                            } else {
-                                ""
-                            }
-                        );
+                if json {
+                    entries.extend(registry_entries_json(&pc, "project"));
+                    entries.extend(registry_entries_json(&gc, "global").into_iter().filter(
+                        |entry| {
+                            !pc.registries
+                                .contains_key(entry["alias"].as_str().unwrap_or_default())
+                        },
+                    ));
+                } else {
+                    print_registry_entries(&pc, "project");
+                    for (a, e) in &gc.registries {
+                        if !pc.registries.contains_key(a) {
+                            println!(
+                                "{a}\t{}\tglobal{}",
+                                registry::display_location(&e.source),
+                                if gc.default_registry.as_deref() == Some(a) {
+                                    "\tdefault"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
                     }
                 }
+            }
+            if json {
+                print_catalog_json(
+                    "registry list",
+                    serde_json::json!({ "registries": entries }),
+                );
             }
             Ok(())
         }
@@ -2044,6 +2065,19 @@ fn print_registry_entries(c: &Config, scope: &str) {
             }
         );
     }
+}
+fn registry_entries_json(c: &Config, scope: &str) -> Vec<serde_json::Value> {
+    c.registries
+        .iter()
+        .map(|(alias, entry)| {
+            serde_json::json!({
+                "alias": alias,
+                "source": registry::display_location(&entry.source),
+                "scope": scope,
+                "default": c.default_registry.as_deref() == Some(alias),
+            })
+        })
+        .collect()
 }
 fn print_plan(plan: &planner::InstallationPlan, registry_name: &str, component: &str) {
     println!(
