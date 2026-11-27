@@ -30,7 +30,7 @@ Each entry has exactly these fields:
 | `manifestSha256` | SHA-256 of the exact reviewed manifest bytes, lowercase 64-character hexadecimal. |
 | `review` | Object with exactly `reviewedAt` (RFC 3339 UTC timestamp), `reviewer` (stable FrilLab account identity), and `notes` (1–1024 bytes, no control characters). |
 
-Each ID and registry URL is unique, compared after canonicalization. Entries may not collide by repository, publisher identity, or reserved namespace. Official entries require an official reserved ID and repository/publisher ownership proof. Community entries are opt-in and are never implicitly trusted. Submitted values are data only; schema validation is not approval.
+Each ID, registry URL, and repository is unique, compared after canonicalization. The publisher identity must match the GitHub repository owner; official entries require an official reserved ID and FrilLab repository ownership. Community entries cannot claim a FrilLab repository or reserved namespace, are opt-in, and are never implicitly trusted. Submitted values are data only; schema validation is not approval.
 
 `deprecated` entries remain visible in discovery but cannot be selected for new install, update, or dependency resolution. Existing lock-based status, remove and exact restore remain independent of current directory status. `suspended` entries are hidden from normal listing and fail closed for any new resolution. Suspension does not delete consumer files or rewrite lockfiles. A corrected entry requires a reviewed directory change. Replacements require a new reviewed revision and digest plus explicit provenance review; an ID cannot silently move to another publisher or repository.
 

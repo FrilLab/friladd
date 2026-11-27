@@ -7,6 +7,8 @@ mod downloader;
 mod installer;
 pub mod lockfile;
 mod planner;
+pub mod public_directory;
+pub mod public_transport;
 mod registry;
 pub mod registry_v2;
 mod resolver;
