@@ -66,11 +66,19 @@ try {
     fril: 'bin/fril.js',
     friladd: 'bin/friladd.js',
   });
-  assert.equal(
-    fs.readdirSync(path.join(installedPackage, 'native')).length,
-    1,
-    'The tarball must contain one platform-native executable for both aliases',
-  );
+  const nativeExecutables = fs.readdirSync(path.join(installedPackage, 'native')).sort();
+  const supportedExecutables = [
+    'friladd-aarch64-apple-darwin',
+    'friladd-x86_64-apple-darwin',
+    'friladd-x86_64-pc-windows-msvc.exe',
+    'friladd-x86_64-unknown-linux-gnu',
+  ];
+  assert.ok(nativeExecutables.length >= 1 && nativeExecutables.length <= supportedExecutables.length);
+  assert.ok(nativeExecutables.every((name) => supportedExecutables.includes(name)));
+  assert.ok(nativeExecutables.every((name) => !name.startsWith('fril-')));
+  if (nativeExecutables.length === supportedExecutables.length) {
+    assert.deepEqual(nativeExecutables, supportedExecutables);
+  }
   const configDir = path.join(tempRoot, 'global-config');
   const invoke = (args, cwd = consumer, command = 'friladd') =>
     run('npm', ['exec', '--yes', '--', command, ...args], cwd, {

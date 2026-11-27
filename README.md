@@ -190,7 +190,7 @@ The filesystem checks protect against accidental traversal and existing symlinks
 
 ## npm and npx
 
-The package name configured for distribution is `friladd`; its `bin` entries expose `fril` and `friladd` through the same launcher implementation. It includes one Rust executable for the current platform (macOS ARM64, macOS x64, Linux x64, or Windows x64). Both command shims select that executable, forward arguments and terminal streams, and return its exit status. `fril` prints `fril VERSION`; the compatibility alias preserves `friladd VERSION`. Both operate on the same project configuration and lockfile. Use `npx friladd` or `npm exec --package=friladd -- fril`; `npx fril` is not an equivalent package invocation.
+The package name configured for distribution is `friladd`; its `bin` entries expose `fril` and `friladd` through the same launcher implementation. It includes one Rust executable for each supported platform (macOS ARM64, macOS x64, Linux x64, and Windows x64). Both command shims select the matching executable, forward arguments and terminal streams, and return its exit status. `fril` prints `fril VERSION`; the compatibility alias preserves `friladd VERSION`. Both operate on the same project configuration and lockfile. Use `npx friladd` or `npm exec --package=friladd -- fril`; `npx fril` is not an equivalent package invocation.
 
 Install FrilAdd globally and use the commands shown above, or invoke the `friladd` package with npx:
 

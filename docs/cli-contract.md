@@ -2,7 +2,7 @@
 
 ## Implemented commands
 
-The commands in this section are implemented in the source tree. Published npm releases have their own versioned behavior. `fril` is the primary command; `friladd` remains a backward-compatible alias. Cargo installs expose both native executable names from the same CLI implementation. The npm package installs both command shims and includes one platform-native executable. The shims pass an explicit command identity to that executable: `fril --version` prints `fril VERSION`, while `friladd --version` preserves `friladd VERSION`; help usage follows the invoked command name. Help examples and diagnostics recommend `fril` for either invocation. For the npm package, append the arguments to `npm exec -- fril` or `npm exec -- friladd`.
+The commands in this section are implemented in the source tree. Published npm releases have their own versioned behavior. `fril` is the primary command; `friladd` remains a backward-compatible alias. Cargo installs expose both native executable names from the same CLI implementation. The npm package installs both command shims and includes one native executable per supported platform. The shims pass an explicit command identity to the selected executable: `fril --version` prints `fril VERSION`, while `friladd --version` preserves `friladd VERSION`; help usage follows the invoked command name. Help examples and diagnostics recommend `fril` for either invocation. For the npm package, append the arguments to `npm exec -- fril` or `npm exec -- friladd`.
 
 | Command | Scope, defaults and output |
 | --- | --- |
