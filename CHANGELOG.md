@@ -4,6 +4,7 @@
 
 - Specify a strict static public directory schema, reserved official namespaces, immutable review provenance, suspension/replacement rules, CLI precedence, and identity-scoped community consent for issues #39–#43. This is contract documentation only: no public discovery command or live endpoint is shipped in this revision.
 - Record the canonical endpoint, deployment, transport enforcement, and real provider admission as outstanding prerequisites; no example fixture is production bootstrap data.
+- Add a separate strict public transport and bounded directory parser for #40: HTTPS allowlist, pinned checked DNS answers, disabled proxies/redirects, immutable repository path matching, and exact manifest digest verification. It is not yet wired to a live directory or install workflow.
 
 ## 0.2.0
 
