@@ -668,7 +668,7 @@ pub fn fetch_url(url: &Url, max_bytes: usize, label: &str) -> Result<(Vec<u8>, U
     fetch_url_with_root(url, max_bytes, label, None)
 }
 
-fn fetch_url_with_root(
+pub(crate) fn fetch_url_with_root(
     url: &Url,
     max_bytes: usize,
     label: &str,

@@ -13,7 +13,7 @@
 - Refuses existing files, symlinks in the destination path, path traversal, and unsupported file types.
 - Keeps downloaded files as source code; it never executes them or invokes npm.
 
-FrilAdd does not discover components across registries, install package dependencies, update or uninstall files, or provide general shadcn Registry compatibility.
+FrilAdd resolves dependencies only from explicitly configured registries. It reports npm package requirements with command suggestions but never executes package managers or edits package manifests. FrilAdd does not provide general shadcn Registry compatibility.
 
 ## Quick start from this repository
 

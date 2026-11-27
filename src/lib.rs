@@ -1,5 +1,6 @@
 pub mod cli;
 mod config;
+mod dependency;
 mod doctor;
 mod downloader;
 #[cfg(test)]
