@@ -66,8 +66,17 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/friladd-artifact"
           if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
             cp "target/${TARGET_TRIPLE}/release/friladd.exe" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}.exe"
+            cp "target/${TARGET_TRIPLE}/release/fril.exe" "${RUNNER_TEMP}/friladd-artifact/fril-${TARGET_TRIPLE}.exe"
           else
             cp "target/${TARGET_TRIPLE}/release/friladd" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}"
+            cp "target/${TARGET_TRIPLE}/release/fril" "${RUNNER_TEMP}/friladd-artifact/fril-${TARGET_TRIPLE}"
+          fi
+          if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
+            "target/${TARGET_TRIPLE}/release/fril.exe" --version
+            "target/${TARGET_TRIPLE}/release/friladd.exe" --version
+          else
+            "target/${TARGET_TRIPLE}/release/fril" --version
+            "target/${TARGET_TRIPLE}/release/friladd" --version
           fi
       - uses: actions/upload-artifact@v7
         with:

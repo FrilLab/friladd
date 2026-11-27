@@ -9,6 +9,7 @@
   },
   "homepage": "https://github.com/FrilLab/friladd#readme",
   "bin": {
+    "fril": "bin/fril.js",
     "friladd": "bin/friladd.js"
   },
   "scripts": {
@@ -17,6 +18,8 @@
   },
   "files": [
     "bin/friladd.js",
+    "bin/fril.js",
+    "bin/launcher.js",
     "native/friladd-*",
     "README.md",
     "LICENSE"

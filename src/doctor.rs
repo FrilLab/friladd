@@ -213,7 +213,7 @@ pub fn inspect(project: Option<PathBuf>, online: bool) -> Result<Report, String>
             Some("Resolve unsafe paths before any managed operation.")
         } else if drift_count > 0 {
             Some(
-                "Run friladd status for per-file details; review local edits before restoring or updating.",
+                "Run fril status for per-file details; review local edits before restoring or updating.",
             )
         } else {
             None
@@ -349,7 +349,7 @@ pub fn inspect(project: Option<PathBuf>, online: bool) -> Result<Report, String>
                 "warn",
                 "No default registry is configured",
                 Some(
-                    "Register a provider with friladd registry add ALIAS SOURCE --default, or select --registry per command.",
+                    "Register a provider with fril registry add ALIAS SOURCE --default, or select --registry per command.",
                 ),
             ),
             Err(error) => doctor_check(
@@ -399,7 +399,7 @@ pub fn inspect(project: Option<PathBuf>, online: bool) -> Result<Report, String>
                                 "fail",
                                 format!("Registry manifest validation failed: {error}"),
                                 Some(
-                                    "Check the registry URL, HTTPS availability, and manifest schema; then run friladd registry verify.",
+                                    "Check the registry URL, HTTPS availability, and manifest schema; then run fril registry verify.",
                                 ),
                             ),
                         }

@@ -2,6 +2,8 @@
 
 FrilAdd treats registry bytes, configuration, lockfiles, and existing project files as untrusted inputs. Selecting a registry delegates control of its declared source and installed content to that publisher. SHA-256 verifies bytes against a manifest. Verify the publisher and pin a reviewed commit or release for reproducibility.
 
+The primary command is `fril`; `friladd` is a compatible alias. Both command names use the same configuration, ownership records, and transaction state, so command identity does not change the security boundary or project files.
+
 ## Paths and changes
 
 - Files follow the Registry v1 portable ASCII relative path rules. Within a plan, the case-folded path of each file must be unique, no file can be a prefix of another target, and shared directory spelling must agree.

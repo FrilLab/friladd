@@ -9,6 +9,40 @@ fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_friladd")
 }
 
+#[test]
+fn native_binary_aliases_have_their_own_names_and_the_same_error_contract() {
+    for (executable, name) in [
+        (env!("CARGO_BIN_EXE_fril"), "fril"),
+        (env!("CARGO_BIN_EXE_friladd"), "friladd"),
+    ] {
+        let version = Command::new(executable).arg("--version").output().unwrap();
+        assert_eq!(version.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8(version.stdout).unwrap().trim(),
+            format!("{name} 0.2.0")
+        );
+        assert!(version.stderr.is_empty());
+
+        let help = Command::new(executable).arg("--help").output().unwrap();
+        assert_eq!(help.status.code(), Some(0));
+        let help = String::from_utf8(help.stdout).unwrap();
+        assert!(help.contains(&format!("Usage: {name} <COMMAND>")));
+        assert!(help.contains("Example: fril add sample"));
+
+        let invalid = Command::new(executable)
+            .arg("invalid-command")
+            .output()
+            .unwrap();
+        assert_eq!(invalid.status.code(), Some(2));
+        assert!(invalid.stdout.is_empty());
+        assert!(
+            String::from_utf8(invalid.stderr)
+                .unwrap()
+                .contains("unrecognized subcommand")
+        );
+    }
+}
+
 fn run(args: &[&str]) -> Output {
     run_in(Path::new(env!("CARGO_MANIFEST_DIR")), args)
 }
@@ -1702,7 +1736,7 @@ fn subcommand_help_and_ambiguous_flags_follow_the_contract() {
         assert!(output.stderr.is_empty(), "{output:?}");
         let stdout = String::from_utf8(output.stdout).unwrap();
         assert!(stdout.contains("Usage: friladd"), "{stdout}");
-        assert!(stdout.contains("Example: friladd"), "{stdout}");
+        assert!(stdout.contains("Example: fril"), "{stdout}");
         if *command != ["registry"] {
             assert!(stdout.contains("--project"), "{stdout}");
         }

@@ -81,7 +81,7 @@ pub fn resolve_add<'a>(
         );
     }
     let manifest = resolve_registry(explicit, alias, project, global)?.ok_or_else(|| {
-        "No default registry is configured.\n\nRegister a project registry:\n  friladd registry add <name> <url> --default\n\nOr register one globally:\n  friladd registry add <name> <url> --global --default".to_string()
+        "No default registry is configured.\n\nRegister a project registry:\n  fril registry add <name> <url> --default\n\nOr register one globally:\n  fril registry add <name> <url> --global --default".to_string()
     })?;
     Ok(Resolution { manifest, item })
 }
@@ -102,7 +102,7 @@ pub fn resolve_list_selection(
     global: &Path,
 ) -> Result<RegistrySelection, String> {
     resolve_registry_selection(explicit, alias, project, global)?.ok_or_else(|| {
-        "No default registry is configured. Use 'friladd registry list' to inspect registered registries.".into()
+        "No default registry is configured. Use 'fril registry list' to inspect registered registries.".into()
     })
 }
 
