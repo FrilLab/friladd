@@ -35,7 +35,7 @@ Issue #11 introduces managed ownership and must support lifecycle commands witho
 ## Consequences and review gates
 
 - #11 owns the lock schema, transaction journal format, OS lock implementation, and fault/recovery tests. #15 owns the compatible v2 reader/schema/fixtures. Both must agree on provider ID, item ID, version/digest, dependency reference, and effective target fields before implementation merges.
-- Managed add/update/remove/restore cannot land before the transaction API. Dependency execution cannot land before exact v2 references and ownership/refcount behavior are reviewed.
+- Managed add/update/remove/restore use the shared transaction API. Registry v2 add records exact resolved dependency edges; removal refuses live dependents and retains dependency items by default. Dependency updates must preserve graph and ownership consistency through the same transaction API.
 - Any deviation requires updating this ADR and the CLI/security docs before downstream implementation. No change to Registry v1, existing command forms, or the current installer is implied by this proposal.
 
 See [Project ownership and recovery](../lock-and-recovery.md) for the implemented API behavior and limits.

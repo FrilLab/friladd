@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Resolve Registry v2 dependency DAGs across explicitly registered providers and install missing graph items with ownership edges in one transaction.
+- Report aggregated package requirements and advisory npm/pnpm/yarn commands without executing package managers or modifying project manifests.
 - Add read-only `doctor` diagnostics with offline-by-default checks for configuration, lockfiles, transaction recovery, managed-file safety/drift, and package manager lockfiles; optional bounded registry manifest validation is available with `--online`.
 - Add versioned JSON output to `registry list` and `registry verify`, with registry source redaction and verification manifest digests.
 - Add deterministic `list`, `search`, and `info` commands with provider-neutral Registry v1/v2 metadata and versioned JSON output.

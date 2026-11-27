@@ -48,6 +48,21 @@ pub struct RegistryFile {
 }
 
 pub fn load_registry(location: &str) -> Result<LoadedRegistry, String> {
+    load_registry_inner(location, None)
+}
+
+#[cfg(test)]
+pub(crate) fn load_registry_with_test_root(
+    location: &str,
+    root: reqwest::Certificate,
+) -> Result<LoadedRegistry, String> {
+    load_registry_inner(location, Some(root))
+}
+
+fn load_registry_inner(
+    location: &str,
+    test_root: Option<reqwest::Certificate>,
+) -> Result<LoadedRegistry, String> {
     let (bytes, source) = if location.contains("://") {
         let url = Url::parse(location).map_err(|_| "Invalid registry URL".to_string())?;
         if url.scheme() != "https"
@@ -59,8 +74,15 @@ pub fn load_registry(location: &str) -> Result<LoadedRegistry, String> {
                 "Remote registries must use an HTTPS URL without embedded credentials".to_string(),
             );
         }
-        let (bytes, final_url) =
-            downloader::fetch_url(&url, MAX_MANIFEST_BYTES, "registry manifest")?;
+        let (bytes, final_url) = match test_root {
+            Some(root) => downloader::fetch_url_with_root(
+                &url,
+                MAX_MANIFEST_BYTES,
+                "registry manifest",
+                Some(root),
+            )?,
+            None => downloader::fetch_url(&url, MAX_MANIFEST_BYTES, "registry manifest")?,
+        };
         (
             bytes,
             RegistrySource::Remote {
@@ -129,6 +151,26 @@ pub fn canonical_local_manifest(location: &str) -> Result<PathBuf, String> {
     }
     fs::canonicalize(&path)
         .map_err(|error| format!("Cannot resolve registry {}: {error}", path.display()))
+}
+
+/// Return an operation-local cache key for a manifest locator without exposing it.
+pub fn canonical_identity(location: &str) -> Result<String, String> {
+    if location.contains("://") {
+        let url = Url::parse(location).map_err(|_| "Invalid registry URL")?;
+        if url.scheme() != "https"
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+        {
+            return Err("Remote registries must use HTTPS without embedded credentials".into());
+        }
+        Ok(url.to_string())
+    } else {
+        Ok(canonical_local_manifest(location)?
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "Registry path is not UTF-8")?)
+    }
 }
 
 pub fn display_location(location: &str) -> String {

@@ -17,8 +17,8 @@ Registry v2 is an opt-in protocol. Registry v1 manifests, including the original
 ## Dependencies
 
 - A registry edge names `providerId`, `itemId`, and exact `version`. A different provider also requires `manifestSha256`. An edge within the same provider omits `manifestSha256` because it selects from the enclosing snapshot. A manifest cannot contain its own digest literally. The lock records the resolved digest for either form.
-- Cross-provider execution requires explicit registrations. The dependency resolver rejects ambiguous providers, unsatisfied versions or digests, missing items, cycles, and target conflicts before mutation. Providers are never discovered or registered from dependency declarations.
-- Package requirements have npm `name`, `spec`, and `kind` (`runtime`, `peer`, or `dev`). A spec is an exact Semantic Version, or a single caret or tilde range around that version. Package aliases, URL or Git specs, tags, arbitrary scripts, and package-manager flags are outside this grammar. Package requirements are reported as metadata.
+- Cross-provider installation requires explicit registrations. `add` resolves each canonical manifest snapshot once per operation and rejects ambiguous provider snapshots, unsatisfied exact versions or digests, missing providers/items, cycles, and target conflicts before acquisition or mutation. Providers are never discovered or registered from dependency declarations. The resolved dependency-first graph and exact edges are recorded in the lock and committed with all newly installed files in one transaction.
+- Package requirements have npm `name`, `spec`, and `kind` (`runtime`, `peer`, or `dev`). A spec is an exact Semantic Version, or a single caret or tilde range around that version. Package aliases, URL or Git specs, tags, arbitrary scripts, and package-manager flags are outside this grammar. `add` aggregates graph requirements, detects incompatible version constraints, and reports structured requirements with advisory npm/pnpm/yarn commands. Package managers are never executed and project package manifests are never modified.
 
 ## Target mapping
 

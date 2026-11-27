@@ -1,9 +1,10 @@
 use crate::{
     config::{self, Config, RegistryEntry, Scope},
-    downloader, lockfile, planner, registry, resolver, transaction,
+    dependency, downloader, lockfile, planner, registry, resolver, transaction,
 };
 use clap::{Args, Parser, Subcommand};
 use std::{
+    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
 };
@@ -604,18 +605,30 @@ fn add(args: AddArgs) -> Result<(), String> {
         &project_config,
         &global,
     )?;
-    let loaded = registry::load_registry(&resolution.manifest)?;
+    let selected_manifest = resolution.manifest;
+    let selected_item = resolution.item.to_owned();
+    let loaded = registry::load_registry(&selected_manifest)?;
     let item = loaded
         .registry
-        .find(resolution.item)
-        .ok_or_else(|| format!("Component not found: {}", resolution.item.escape_debug()))?;
+        .find(&selected_item)
+        .ok_or_else(|| format!("Component not found: {}", selected_item.escape_debug()))?;
     let v2_item = loaded
         .v2
         .as_ref()
-        .map(|v2| v2.select(resolution.item, None))
+        .map(|v2| v2.select(&selected_item, None))
         .transpose()?;
-    if v2_item.is_some_and(|item| !item.dependencies.is_empty()) {
-        return Err("This item declares dependencies; dependency installation is available in a later FrilAdd release.".into());
+    if let Some(root_item_id) = v2_item.map(|item| item.id.clone()) {
+        return add_v2_graph(GraphRequest {
+            dry_run: args.dry_run,
+            json: args.json,
+            project_root: &project_root,
+            project_config: &project_config,
+            global_config: &global,
+            declared_root_source: &selected_manifest,
+            root_loaded: loaded,
+            root_item_id: &root_item_id,
+            updating: None,
+        });
     }
     if !args.dry_run {
         transaction::recover(&project_root)?;
@@ -624,7 +637,7 @@ fn add(args: AddArgs) -> Result<(), String> {
     let declared_manifest_locator;
     let manifest_source = match &loaded.source {
         registry::RegistrySource::Local { .. } => {
-            let path = registry::canonical_local_manifest(&resolution.manifest)?;
+            let path = registry::canonical_local_manifest(&selected_manifest)?;
             let url = url::Url::from_file_path(path)
                 .map_err(|_| "Cannot represent manifest provenance as a file URL")?;
             provider_id = if let Some(v2) = &loaded.v2 {
@@ -637,7 +650,7 @@ fn add(args: AddArgs) -> Result<(), String> {
         }
         registry::RegistrySource::Remote { manifest_url } => {
             let url = sanitized_remote_locator(manifest_url.as_str())?;
-            let declared = sanitized_remote_locator(&resolution.manifest)?;
+            let declared = sanitized_remote_locator(&selected_manifest)?;
             if let Some(v2) = &loaded.v2 {
                 provider_id = format!("v2:{}", v2.id);
             } else {
@@ -878,6 +891,880 @@ fn add(args: AddArgs) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+struct PlannedGraphItem {
+    key: dependency::ItemKey,
+    plan: planner::InstallationPlan,
+    target_root: Option<String>,
+    declared_source: String,
+    resolved_source: String,
+    provider_id: String,
+    existing: Option<lockfile::Item>,
+}
+
+struct GraphRequest<'a> {
+    dry_run: bool,
+    json: bool,
+    project_root: &'a Path,
+    project_config: &'a Path,
+    global_config: &'a Path,
+    declared_root_source: &'a str,
+    root_loaded: registry::LoadedRegistry,
+    root_item_id: &'a str,
+    updating: Option<lockfile::Item>,
+}
+
+fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
+    let GraphRequest {
+        dry_run,
+        json,
+        project_root,
+        project_config,
+        global_config,
+        declared_root_source,
+        root_loaded,
+        root_item_id,
+        updating,
+    } = request;
+    if !dry_run {
+        transaction::recover(project_root)?;
+    }
+    let graph = dependency::Graph::resolve(
+        declared_root_source,
+        root_loaded,
+        root_item_id,
+        project_config,
+        global_config,
+    )?;
+    let before = lockfile::load(project_root)?;
+    let owners = before.lock().owners();
+    let target_map = crate::registry_v2::TargetMap::load(project_root)?;
+    let mut pending = Vec::<PlannedGraphItem>::new();
+    let mut reused = BTreeMap::<dependency::ItemKey, lockfile::Item>::new();
+    let mut package_requirements = BTreeMap::<String, Vec<serde_json::Value>>::new();
+    let mut all_new_bytes = 0_u64;
+
+    for key in &graph.order {
+        let node = graph
+            .nodes
+            .get(key)
+            .ok_or("Resolved dependency node is missing")?;
+        let item = graph.item(key)?;
+        let snapshot = &graph.snapshots[node.snapshot];
+        let v2 = snapshot
+            .loaded
+            .v2
+            .as_ref()
+            .ok_or("Resolved dependency registry is not Registry v2")?;
+        let provider_id = format!("v2:{}", v2.id);
+        let expected_dependencies = node
+            .dependencies
+            .iter()
+            .map(|dependency_key| {
+                let dependency_node = graph
+                    .nodes
+                    .get(dependency_key)
+                    .ok_or("Resolved dependency edge is missing")?;
+                let dependency_item = graph.item(dependency_key)?;
+                Ok(lockfile::Dependency {
+                    provider_id: dependency_key.0.clone(),
+                    item_id: dependency_key.1.clone(),
+                    version: dependency_item.version.clone(),
+                    manifest_sha256: graph.snapshots[dependency_node.snapshot]
+                        .loaded
+                        .manifest_sha256
+                        .clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        for package in &item.packages {
+            package_requirements
+                .entry(package.name.clone())
+                .or_default()
+                .push(serde_json::json!({
+                    "spec": package.spec,
+                    "kind": package_kind_name(package.kind),
+                    "requiredBy": { "providerId": key.0, "itemId": key.1 }
+                }));
+        }
+
+        let existing_record = before
+            .lock()
+            .items
+            .iter()
+            .find(|record| record.provider_id == key.0 && record.item_id == key.1)
+            .cloned();
+        if let Some(existing) = existing_record.as_ref() {
+            let same_graph_snapshot = existing.version.as_deref() == Some(item.version.as_str())
+                && existing.manifest_sha256 == snapshot.loaded.manifest_sha256
+                && existing.dependencies == expected_dependencies
+                && existing.files.len() == item.files.len()
+                && item.files.iter().all(|asset| {
+                    existing.files.iter().any(|file| {
+                        file.source == asset.source
+                            && file.declared_target == asset.target
+                            && file.expected_sha256 == asset.sha256
+                            && file.installed.size == asset.size
+                    })
+                });
+            if !same_graph_snapshot && updating.is_none() {
+                return Err(format!(
+                    "Dependency {} is already installed from a different version or graph; update it explicitly before adding this item",
+                    display_graph_item(key)
+                ));
+            }
+            if !same_graph_snapshot && updating.is_some() {
+                let external_dependent = before.lock().items.iter().any(|candidate| {
+                    !graph
+                        .nodes
+                        .contains_key(&(candidate.provider_id.clone(), candidate.item_id.clone()))
+                        && candidate.dependencies.iter().any(|dependency| {
+                            dependency.provider_id == key.0
+                                && dependency.item_id == key.1
+                                && (dependency.version != item.version
+                                    || dependency.manifest_sha256
+                                        != snapshot.loaded.manifest_sha256)
+                        })
+                });
+                if external_dependent {
+                    return Err(format!(
+                        "Cannot update {} because an installed item outside this graph pins a different exact version or manifest digest",
+                        display_graph_item(key)
+                    ));
+                }
+            }
+            for file in &existing.files {
+                ensure_unchanged_managed_file(project_root, file)?;
+            }
+            if same_graph_snapshot {
+                reused.insert(key.clone(), existing.clone());
+                continue;
+            }
+        }
+
+        let target_root = if updating.is_some() && existing_record.is_some() {
+            existing_record
+                .as_ref()
+                .and_then(|existing| existing.target_root.clone())
+        } else {
+            target_map.root(item.kind, None)?
+        };
+        let mapped_item = crate::registry::RegistryItem {
+            name: item.id.clone(),
+            description: item.description.clone().unwrap_or_else(|| item.id.clone()),
+            files: item
+                .files
+                .iter()
+                .map(|asset| crate::registry::RegistryFile {
+                    source: asset.source.clone(),
+                    target: target_root.as_ref().map_or_else(
+                        || asset.target.clone(),
+                        |root| format!("{root}/{}", asset.target),
+                    ),
+                    sha256: asset.sha256.clone(),
+                })
+                .collect(),
+        };
+        let plan = planner::build_plan(project_root, &mapped_item)?;
+        let conflict_targets = plan
+            .conflicts
+            .iter()
+            .filter(|target| {
+                !existing_record.as_ref().is_some_and(|existing| {
+                    existing.provider_id == key.0
+                        && existing.item_id == key.1
+                        && existing.files.iter().any(|file| &file.target == *target)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !conflict_targets.is_empty() {
+            return Err(format!(
+                "Dependency {} conflicts with existing unmanaged files: {}",
+                display_graph_item(key),
+                conflict_targets.join(", ")
+            ));
+        }
+        for file in &plan.files {
+            if let Some((owner, _)) = owners.get(file.target_display.as_str())
+                && !existing_record.as_ref().is_some_and(|existing| {
+                    owner.provider_id == existing.provider_id && owner.item_id == existing.item_id
+                })
+            {
+                return Err(format!(
+                    "Dependency destination {} is owned by {}/{}",
+                    file.target_display, owner.provider_id, owner.item_id
+                ));
+            }
+        }
+        for asset in &item.files {
+            all_new_bytes = all_new_bytes
+                .checked_add(asset.size)
+                .ok_or("Dependency operation size overflow")?;
+            if asset.size > crate::downloader::MAX_V2_FILE_BYTES as u64
+                || all_new_bytes > crate::downloader::MAX_OPERATION_BYTES
+            {
+                return Err("Dependency operation exceeds the 512 MiB acquisition limit".into());
+            }
+        }
+        let (provenance_provider, declared_source, resolved_source) =
+            candidate_provenance(&snapshot.loaded, &snapshot.declared)?;
+        if provenance_provider != provider_id {
+            return Err("Resolved dependency source disagrees with provider identity".into());
+        }
+        pending.push(PlannedGraphItem {
+            key: key.clone(),
+            plan,
+            target_root,
+            declared_source,
+            resolved_source,
+            provider_id,
+            existing: existing_record,
+        });
+    }
+
+    validate_package_requirements(&mut package_requirements)?;
+    let replaced_items = pending
+        .iter()
+        .filter_map(|node| node.existing.as_ref())
+        .map(|item| (item.provider_id.clone(), item.item_id.clone()))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut project_targets: Vec<String> = before
+        .lock()
+        .items
+        .iter()
+        .filter(|item| !replaced_items.contains(&(item.provider_id.clone(), item.item_id.clone())))
+        .flat_map(|item| item.files.iter().map(|file| file.target.clone()))
+        .collect();
+    project_targets.extend(pending.iter().flat_map(|node| {
+        node.plan
+            .files
+            .iter()
+            .map(|file| file.target_display.clone())
+    }));
+    crate::registry::validate_targets(project_targets.iter().map(String::as_str))?;
+
+    if pending.is_empty() {
+        let root = graph.item(&graph.root)?;
+        let root_snapshot = graph.nodes[&graph.root].snapshot;
+        let files = reused
+            .values()
+            .flat_map(|item| {
+                item.files
+                    .iter()
+                    .map(move |file| graph_file_json(item, file, "unchanged"))
+            })
+            .collect::<Vec<_>>();
+        if updating.is_some() {
+            emit_graph_update(json, dry_run, &graph, files, &package_requirements)?;
+        } else {
+            emit_graph_add(
+                json,
+                dry_run,
+                &graph,
+                root,
+                &graph.snapshots[root_snapshot].loaded.manifest_sha256,
+                files,
+                &package_requirements,
+            )?;
+        }
+        if !json {
+            if updating.is_some() {
+                println!("{} is already current (no changes).", root.id);
+            } else {
+                println!(
+                    "Already installed {} and its resolved dependency graph (no changes).",
+                    root.id
+                );
+            }
+            print_package_suggestions(&package_requirements);
+        }
+        return Ok(());
+    }
+
+    let mut acquisitions = Vec::with_capacity(pending.len());
+    for planned in &pending {
+        let node = &graph.nodes[&planned.key];
+        let snapshot = &graph.snapshots[node.snapshot];
+        let item = graph.item(&planned.key)?;
+        let sizes = planned
+            .plan
+            .files
+            .iter()
+            .map(|file| {
+                item.files
+                    .iter()
+                    .find(|asset| asset.source == file.source)
+                    .map(|asset| asset.size)
+                    .ok_or("Registry item asset is missing from its installation plan")
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        acquisitions.push(downloader::acquire_v2_files_with_sizes(
+            &snapshot.loaded.source,
+            &planned.plan,
+            &sizes,
+        )?);
+    }
+
+    let mut next = before.lock().clone();
+    let mut edits = Vec::new();
+    let mut json_files = reused
+        .values()
+        .flat_map(|item| {
+            item.files
+                .iter()
+                .map(|file| graph_file_json(item, file, "unchanged"))
+        })
+        .collect::<Vec<_>>();
+    for (planned, acquired) in pending.iter().zip(&acquisitions) {
+        let node = &graph.nodes[&planned.key];
+        let snapshot = &graph.snapshots[node.snapshot];
+        let item = graph.item(&planned.key)?;
+        if !next
+            .providers
+            .iter()
+            .any(|provider| provider.provider_id == planned.provider_id)
+        {
+            next.providers.push(lockfile::Provider {
+                provider_id: planned.provider_id.clone(),
+                declared_source: planned.declared_source.clone(),
+                resolved_source: planned.resolved_source.clone(),
+                manifest_sha256: snapshot.loaded.manifest_sha256.clone(),
+            });
+        } else if planned.existing.is_some() {
+            let provider = next
+                .providers
+                .iter_mut()
+                .find(|provider| provider.provider_id == planned.provider_id)
+                .ok_or("Installed dependency item has no provider record")?;
+            provider.declared_source = planned.declared_source.clone();
+            provider.resolved_source = planned.resolved_source.clone();
+            provider.manifest_sha256 = snapshot.loaded.manifest_sha256.clone();
+        }
+        let dependencies = node
+            .dependencies
+            .iter()
+            .map(|key| {
+                let dep_node = &graph.nodes[key];
+                let dep = graph.item(key)?;
+                Ok(lockfile::Dependency {
+                    provider_id: key.0.clone(),
+                    item_id: key.1.clone(),
+                    version: dep.version.clone(),
+                    manifest_sha256: graph.snapshots[dep_node.snapshot]
+                        .loaded
+                        .manifest_sha256
+                        .clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let mut files = Vec::with_capacity(planned.plan.files.len());
+        let mut content_by_target = BTreeMap::new();
+        for (file, content) in planned.plan.files.iter().zip(&acquired.files) {
+            let asset = item
+                .files
+                .iter()
+                .find(|asset| asset.source == file.source)
+                .ok_or("Registry item asset is missing from its installation plan")?;
+            if content.sha256 != asset.sha256 || content.size != asset.size {
+                return Err(format!("Integrity mismatch for {}", file.source));
+            }
+            let resolved_source = match &content.resolved_locator {
+                Some(locator) => locator.clone(),
+                None => snapshot.loaded.source.manifest_base(&file.source)?,
+            };
+            files.push(lockfile::OwnedFile {
+                source: file.source.clone(),
+                resolved_source,
+                declared_target: asset.target.clone(),
+                target: file.target_display.clone(),
+                expected_sha256: asset.sha256.clone(),
+                installed: lockfile::Content {
+                    sha256: content.sha256.clone(),
+                    size: content.size,
+                },
+            });
+            content_by_target.insert(file.target_display.clone(), content.path.clone());
+        }
+        let lock_item = lockfile::Item {
+            provider_id: planned.provider_id.clone(),
+            item_id: planned.key.1.clone(),
+            version: Some(item.version.clone()),
+            manifest_source: planned.resolved_source.clone(),
+            manifest_sha256: snapshot.loaded.manifest_sha256.clone(),
+            target_root: planned.target_root.clone(),
+            dependencies,
+            files,
+        };
+        let previous_files = planned
+            .existing
+            .as_ref()
+            .map(|existing| {
+                existing
+                    .files
+                    .iter()
+                    .map(|file| (file.target.as_str(), file))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        for file in &lock_item.files {
+            let previous = previous_files.get(file.target.as_str()).copied();
+            let (action, before_content) = match previous {
+                Some(old) if old.installed == file.installed => ("unchanged", None),
+                Some(old) => ("replace", Some(old.installed.clone())),
+                None => ("install", None),
+            };
+            if action != "unchanged" {
+                edits.push(transaction::Edit {
+                    target: file.target.clone(),
+                    before: before_content,
+                    write: Some(transaction::WriteSource::File(
+                        content_by_target
+                            .get(&file.target)
+                            .ok_or("Missing verified graph artifact bytes")?
+                            .clone(),
+                    )),
+                });
+            }
+            json_files.push(json_file_action(
+                &file.target,
+                action,
+                if previous.is_some() {
+                    planned.existing.as_ref()
+                } else {
+                    None
+                },
+                Some(&lock_item),
+            ));
+        }
+        if let Some(existing) = planned.existing.as_ref() {
+            for old in &existing.files {
+                if !lock_item.files.iter().any(|file| file.target == old.target) {
+                    edits.push(transaction::Edit {
+                        target: old.target.clone(),
+                        before: Some(old.installed.clone()),
+                        write: None,
+                    });
+                    json_files.push(json_file_action(
+                        &old.target,
+                        "remove",
+                        Some(existing),
+                        None,
+                    ));
+                }
+            }
+        }
+        if let Some(index) = next.items.iter().position(|existing| {
+            existing.provider_id == lock_item.provider_id && existing.item_id == lock_item.item_id
+        }) {
+            next.items[index] = lock_item;
+        } else {
+            next.items.push(lock_item);
+        }
+    }
+
+    json_files.sort_by(|left, right| left["target"].as_str().cmp(&right["target"].as_str()));
+
+    let transaction = transaction::Plan::new(before, next, edits)?;
+    transaction.check(project_root)?;
+    if dry_run {
+        if updating.is_some() {
+            emit_graph_update(json, true, &graph, json_files, &package_requirements)?;
+        } else {
+            emit_graph_add(
+                json,
+                true,
+                &graph,
+                graph.item(&graph.root)?,
+                &graph.snapshots[graph.nodes[&graph.root].snapshot]
+                    .loaded
+                    .manifest_sha256,
+                json_files,
+                &package_requirements,
+            )?;
+        }
+        if !json {
+            for planned in &pending {
+                println!(
+                    "Will {} {}/{}",
+                    if updating.is_some() {
+                        "update"
+                    } else {
+                        "install"
+                    },
+                    planned.key.0,
+                    planned.key.1
+                );
+                for file in &planned.plan.files {
+                    println!("  {}", file.target_display);
+                }
+            }
+            print_package_suggestions(&package_requirements);
+            println!("Dry run: no project files were changed.");
+        }
+        return Ok(());
+    }
+    transaction::apply(project_root, transaction)?;
+    if updating.is_some() {
+        emit_graph_update(json, false, &graph, json_files, &package_requirements)?;
+    } else {
+        emit_graph_add(
+            json,
+            false,
+            &graph,
+            graph.item(&graph.root)?,
+            &graph.snapshots[graph.nodes[&graph.root].snapshot]
+                .loaded
+                .manifest_sha256,
+            json_files,
+            &package_requirements,
+        )?;
+    }
+    if !json {
+        for planned in &pending {
+            println!(
+                "{} {}/{}",
+                if updating.is_some() {
+                    "Updated"
+                } else {
+                    "Installed"
+                },
+                planned.key.0,
+                planned.key.1
+            );
+            for file in &planned.plan.files {
+                println!("  {}", file.target_display);
+            }
+        }
+        print_package_suggestions(&package_requirements);
+    }
+    Ok(())
+}
+
+trait ManifestBase {
+    fn manifest_base(&self, source: &str) -> Result<String, String>;
+}
+
+impl ManifestBase for registry::RegistrySource {
+    fn manifest_base(&self, source: &str) -> Result<String, String> {
+        match self {
+            registry::RegistrySource::Local { root } => url::Url::from_directory_path(root)
+                .map_err(|_| "Cannot represent local artifact base")?
+                .join(source)
+                .map(|url| url.to_string())
+                .map_err(|_| "Invalid resolved artifact locator".into()),
+            registry::RegistrySource::Remote { manifest_url } => manifest_url
+                .join(source)
+                .map(|url| {
+                    let mut url = url;
+                    url.set_query(None);
+                    url.set_fragment(None);
+                    url.to_string()
+                })
+                .map_err(|_| "Invalid resolved artifact locator".into()),
+        }
+    }
+}
+
+fn package_kind_name(kind: crate::registry_v2::PackageKind) -> &'static str {
+    match kind {
+        crate::registry_v2::PackageKind::Runtime => "runtime",
+        crate::registry_v2::PackageKind::Peer => "peer",
+        crate::registry_v2::PackageKind::Dev => "dev",
+    }
+}
+
+fn validate_package_requirements(
+    packages: &mut BTreeMap<String, Vec<serde_json::Value>>,
+) -> Result<(), String> {
+    for (name, requirements) in packages {
+        requirements.sort_by(|left, right| {
+            (
+                left["spec"].as_str(),
+                left["kind"].as_str(),
+                left["requiredBy"]["providerId"].as_str(),
+                left["requiredBy"]["itemId"].as_str(),
+            )
+                .cmp(&(
+                    right["spec"].as_str(),
+                    right["kind"].as_str(),
+                    right["requiredBy"]["providerId"].as_str(),
+                    right["requiredBy"]["itemId"].as_str(),
+                ))
+        });
+        let specs = requirements
+            .iter()
+            .filter_map(|requirement| requirement["spec"].as_str())
+            .collect::<Vec<_>>();
+        if !package_specs_overlap(&specs)? {
+            return Err(format!(
+                "Conflicting package requirements for {name}: {}",
+                specs.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn package_specs_overlap(specs: &[&str]) -> Result<bool, String> {
+    if specs.len() < 2 {
+        return Ok(true);
+    }
+    let requirements = specs
+        .iter()
+        .map(|spec| {
+            let value = spec.strip_prefix(['^', '~']).unwrap_or(spec);
+            let version =
+                semver::Version::parse(value).map_err(|_| "Invalid package requirement version")?;
+            let requirement =
+                semver::VersionReq::parse(spec).map_err(|_| "Invalid package requirement spec")?;
+            Ok((version, requirement))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let max = requirements
+        .iter()
+        .map(|(version, _)| version)
+        .max()
+        .ok_or("Package requirement set is empty")?;
+    let mut candidates = requirements
+        .iter()
+        .map(|(version, _)| version.clone())
+        .collect::<Vec<_>>();
+    candidates.push(max.clone());
+    let mut stable = max.clone();
+    stable.pre = semver::Prerelease::EMPTY;
+    stable.build = semver::BuildMetadata::EMPTY;
+    candidates.push(stable);
+    let mut patch = max.clone();
+    patch.pre = semver::Prerelease::EMPTY;
+    patch.build = semver::BuildMetadata::EMPTY;
+    patch.patch = patch.patch.saturating_add(1);
+    candidates.push(patch);
+    Ok(candidates.iter().any(|candidate| {
+        requirements
+            .iter()
+            .all(|(_, requirement)| requirement.matches(candidate))
+    }))
+}
+
+fn print_package_suggestions(packages: &BTreeMap<String, Vec<serde_json::Value>>) {
+    for (name, requirements) in packages {
+        for requirement in requirements {
+            let Some(spec) = requirement["spec"].as_str() else {
+                continue;
+            };
+            let reference = format!("{name}@{spec}");
+            println!("Package requirement (advisory; FrilAdd will not run it): {reference}");
+            println!("  npm: npm install '{reference}'");
+            println!("  pnpm: pnpm add '{reference}'");
+            println!("  yarn: yarn add '{reference}'");
+        }
+    }
+}
+
+fn graph_package_json(
+    packages: &BTreeMap<String, Vec<serde_json::Value>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    packages
+        .iter()
+        .map(|(name, requirements)| -> Result<_, String> {
+            let specs = requirements
+                .iter()
+                .filter_map(|requirement| requirement["spec"].as_str())
+                .collect::<Vec<_>>();
+            let suggestions = requirements
+                .iter()
+                .filter_map(|requirement| requirement["spec"].as_str())
+                .map(|spec| {
+                    let reference = format!("{name}@{spec}");
+                    serde_json::json!({
+                        "npm": format!("npm install '{reference}'"),
+                        "pnpm": format!("pnpm add '{reference}'"),
+                        "yarn": format!("yarn add '{reference}'"),
+                    })
+                })
+                .collect::<Vec<_>>();
+            Ok(serde_json::json!({
+                "name": name,
+                "requirements": requirements,
+                "compatible": package_specs_overlap(&specs)?,
+                "suggestions": {
+                    "npm": suggestions.iter().map(|suggestion| suggestion["npm"].clone()).collect::<Vec<_>>(),
+                    "pnpm": suggestions.iter().map(|suggestion| suggestion["pnpm"].clone()).collect::<Vec<_>>(),
+                    "yarn": suggestions.iter().map(|suggestion| suggestion["yarn"].clone()).collect::<Vec<_>>(),
+                },
+            }))
+        })
+        .collect()
+}
+
+fn emit_graph_add(
+    json: bool,
+    dry_run: bool,
+    graph: &dependency::Graph,
+    root: &crate::registry_v2::Item,
+    root_manifest_sha256: &str,
+    files: Vec<serde_json::Value>,
+    packages: &BTreeMap<String, Vec<serde_json::Value>>,
+) -> Result<(), String> {
+    if !json {
+        return Ok(());
+    }
+    let items = graph_items_json(graph)?;
+    let package_data = graph_package_json(packages)?;
+    let root_key = &graph.root;
+    println!(
+        "{}",
+        serde_json::json!({
+            "schemaVersion": 1,
+            "command": "add",
+            "data": {
+                "dryRun": dry_run,
+                "item": {
+                    "providerId": root_key.0,
+                    "itemId": root.id,
+                    "version": root.version,
+                    "manifestSha256": root_manifest_sha256,
+                },
+                "items": items,
+                "files": files,
+                "packages": package_data,
+            }
+        })
+    );
+    Ok(())
+}
+
+fn graph_items_json(graph: &dependency::Graph) -> Result<Vec<serde_json::Value>, String> {
+    let mut items = Vec::with_capacity(graph.order.len());
+    for key in &graph.order {
+        let node = graph
+            .nodes
+            .get(key)
+            .ok_or("Resolved dependency node is missing")?;
+        let item = graph.item(key)?;
+        let mut dependencies = Vec::with_capacity(node.dependencies.len());
+        for dependency in &node.dependencies {
+            let dep_node = graph
+                .nodes
+                .get(dependency)
+                .ok_or("Resolved dependency edge is missing")?;
+            let dep_item = graph.item(dependency)?;
+            dependencies.push(serde_json::json!({
+                "providerId": dependency.0,
+                "itemId": dependency.1,
+                "version": dep_item.version,
+                "manifestSha256": graph.snapshots[dep_node.snapshot].loaded.manifest_sha256,
+            }));
+        }
+        items.push(serde_json::json!({
+            "providerId": key.0,
+            "itemId": key.1,
+            "version": item.version,
+            "manifestSha256": graph.snapshots[node.snapshot].loaded.manifest_sha256,
+            "dependencies": dependencies,
+        }));
+    }
+    Ok(items)
+}
+
+fn emit_graph_update(
+    json: bool,
+    dry_run: bool,
+    graph: &dependency::Graph,
+    files: Vec<serde_json::Value>,
+    packages: &BTreeMap<String, Vec<serde_json::Value>>,
+) -> Result<(), String> {
+    if !json {
+        return Ok(());
+    }
+    let package_data = graph_package_json(packages)?;
+    let mut grouped = BTreeMap::<(String, String), Vec<serde_json::Value>>::new();
+    for file in files {
+        let owner = if file["ownerAfter"].is_object() {
+            &file["ownerAfter"]
+        } else {
+            &file["ownerBefore"]
+        };
+        let provider = owner["providerId"]
+            .as_str()
+            .ok_or("Update action is missing its provider owner")?;
+        let item = owner["itemId"]
+            .as_str()
+            .ok_or("Update action is missing its item owner")?;
+        grouped
+            .entry((provider.to_owned(), item.to_owned()))
+            .or_default()
+            .push(file);
+    }
+    let items = grouped
+        .into_iter()
+        .map(|((provider_id, item_id), mut actions)| {
+            actions.sort_by(|left, right| left["target"].as_str().cmp(&right["target"].as_str()));
+            serde_json::json!({
+                "providerId": provider_id,
+                "itemId": item_id,
+                "actions": actions,
+            })
+        })
+        .collect::<Vec<_>>();
+    println!(
+        "{}",
+        serde_json::json!({
+            "schemaVersion": 1,
+            "command": "update",
+            "data": {
+                "dryRun": dry_run,
+                "items": items,
+                "dependencyGraph": graph_items_json(graph)?,
+                "packages": package_data,
+            }
+        })
+    );
+    Ok(())
+}
+
+fn graph_file_json(
+    item: &lockfile::Item,
+    file: &lockfile::OwnedFile,
+    action: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "target": file.target,
+        "action": action,
+        "ownerBefore": {"providerId": item.provider_id, "itemId": item.item_id},
+        "ownerAfter": {"providerId": item.provider_id, "itemId": item.item_id},
+    })
+}
+
+fn display_graph_item(key: &dependency::ItemKey) -> String {
+    format!("{}/{}", key.0, key.1)
+}
+
+fn ensure_unchanged_managed_file(
+    project_root: &Path,
+    file: &lockfile::OwnedFile,
+) -> Result<(), String> {
+    match transaction::observe(project_root, &file.target)? {
+        transaction::Observation::Content(content) if content == file.installed => Ok(()),
+        transaction::Observation::Missing => Err(format!(
+            "Managed file {} is missing; run restore before changing the dependency graph",
+            file.target
+        )),
+        transaction::Observation::Content(_) => Err(format!(
+            "Managed file {} was modified; preserve it and resolve the edit before changing the dependency graph",
+            file.target
+        )),
+        transaction::Observation::Unsafe => Err(format!(
+            "Managed path {} is unsafe; refusing dependency graph change",
+            file.target
+        )),
+        transaction::Observation::Unreadable => Err(format!(
+            "Managed file {} is unreadable; refusing dependency graph change",
+            file.target
+        )),
+    }
 }
 
 fn print_add_json(
@@ -1297,11 +2184,6 @@ fn update(args: UpdateArgs) -> Result<(), String> {
         }
         None
     };
-    if v2_item.is_some_and(|item| !item.dependencies.is_empty())
-        || !existing.dependencies.is_empty()
-    {
-        return Err("Update would change or retain unresolved dependency state; dependency-aware lifecycle is not available yet".into());
-    }
     if let (Some(old), Some(new)) = (
         existing.version.as_deref(),
         v2_item.map(|item| item.version.as_str()),
@@ -1312,6 +2194,20 @@ fn update(args: UpdateArgs) -> Result<(), String> {
         return Err(format!(
             "Candidate version {new} is older than installed version {old}; pass --allow-downgrade to confirm"
         ));
+    }
+    if v2_item.is_some() {
+        let root_item_id = existing.item_id.clone();
+        return add_v2_graph(GraphRequest {
+            dry_run: args.dry_run,
+            json: args.json,
+            project_root,
+            project_config: &project_config,
+            global_config: &global,
+            declared_root_source: &candidate_location,
+            root_loaded: loaded,
+            root_item_id: &root_item_id,
+            updating: Some(existing),
+        });
     }
     let candidate_item = loaded.registry.find(&existing.item_id).ok_or_else(|| {
         format!(
@@ -1661,11 +2557,33 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
     }
     let snapshot = lockfile::load(project_root)?;
     let before = snapshot.lock().clone();
-    let selected: Vec<_> = if let Some(selector) = args.item.as_deref() {
-        vec![select_mutation_item(&before, selector, &project_config, &global)?.clone()]
-    } else {
-        before.items.clone()
-    };
+    let selected: Vec<_> =
+        if let Some(selector) = args.item.as_deref() {
+            let root = select_mutation_item(&before, selector, &project_config, &global)?;
+            let mut closure = std::collections::BTreeSet::<(String, String)>::new();
+            let mut pending = vec![(root.provider_id.clone(), root.item_id.clone())];
+            while let Some(key) = pending.pop() {
+                if !closure.insert(key.clone()) {
+                    continue;
+                }
+                let item = before
+                    .items
+                    .iter()
+                    .find(|item| item.provider_id == key.0 && item.item_id == key.1)
+                    .ok_or("Lock dependency closure is incomplete")?;
+                pending.extend(item.dependencies.iter().map(|dependency| {
+                    (dependency.provider_id.clone(), dependency.item_id.clone())
+                }));
+            }
+            before
+                .items
+                .iter()
+                .filter(|item| closure.contains(&(item.provider_id.clone(), item.item_id.clone())))
+                .cloned()
+                .collect()
+        } else {
+            before.items.clone()
+        };
     let mut edits = Vec::new();
     let mut item_results = Vec::new();
     let mut restore_bytes = 0_u64;

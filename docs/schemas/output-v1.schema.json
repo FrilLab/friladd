@@ -133,7 +133,9 @@
             "properties": {
               "dryRun": { "type": "boolean" },
               "item": { "$ref": "#/$defs/addItem" },
-              "files": { "type": "array", "items": { "$ref": "#/$defs/addFile" } }
+              "files": { "type": "array", "items": { "$ref": "#/$defs/addFile" } },
+              "items": { "type": "array", "items": { "$ref": "#/$defs/addGraphItem" } },
+              "packages": { "type": "array", "items": { "$ref": "#/$defs/addPackage" } }
             },
             "additionalProperties": false
           }
@@ -195,7 +197,9 @@
             "required": ["dryRun", "items"],
             "properties": {
               "dryRun": { "type": "boolean" },
-              "items": { "type": "array", "items": { "$ref": "#/$defs/mutationItem" } }
+              "items": { "type": "array", "items": { "$ref": "#/$defs/mutationItem" } },
+              "dependencyGraph": { "type": "array", "items": { "$ref": "#/$defs/addGraphItem" } },
+              "packages": { "type": "array", "items": { "$ref": "#/$defs/addPackage" } }
             },
             "additionalProperties": false
           }
@@ -266,6 +270,63 @@
         "action": { "enum": ["install", "unchanged"] },
         "ownerBefore": { "oneOf": [{ "$ref": "#/$defs/owner" }, { "type": "null" }] },
         "ownerAfter": { "$ref": "#/$defs/owner" }
+      },
+      "additionalProperties": false
+    },
+    "addGraphItem": {
+      "type": "object",
+      "required": ["providerId", "itemId", "version", "manifestSha256", "dependencies"],
+      "properties": {
+        "providerId": { "type": "string", "minLength": 1 },
+        "itemId": { "type": "string", "minLength": 1 },
+        "version": { "$ref": "#/$defs/version" },
+        "manifestSha256": { "$ref": "#/$defs/digest" },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["providerId", "itemId", "version", "manifestSha256"],
+            "properties": {
+              "providerId": { "type": "string", "minLength": 1 },
+              "itemId": { "type": "string", "minLength": 1 },
+              "version": { "$ref": "#/$defs/version" },
+              "manifestSha256": { "$ref": "#/$defs/digest" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "addPackage": {
+      "type": "object",
+      "required": ["name", "requirements", "compatible", "suggestions"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "requirements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["spec", "kind", "requiredBy"],
+            "properties": {
+              "spec": { "type": "string", "minLength": 1 },
+              "kind": { "enum": ["runtime", "peer", "dev"] },
+              "requiredBy": { "$ref": "#/$defs/owner" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "compatible": { "type": "boolean" },
+        "suggestions": {
+          "type": "object",
+          "required": ["npm", "pnpm", "yarn"],
+          "properties": {
+            "npm": { "type": "array", "items": { "type": "string" } },
+            "pnpm": { "type": "array", "items": { "type": "string" } },
+            "yarn": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },

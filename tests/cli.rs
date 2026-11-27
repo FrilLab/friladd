@@ -2681,6 +2681,871 @@ fn v2_large_binary_streams_through_verified_staging_and_v1_cap_is_preserved() {
     assert!(!project.path().join("v1-model.glb").exists());
 }
 
+#[test]
+fn add_resolves_and_commits_a_cross_registry_dependency_graph_atomically() {
+    use sha2::{Digest, Sha256};
+
+    let ui = tempdir().unwrap();
+    let assets = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let component_bytes = b"export const Widget = () => null;\n";
+    let asset_bytes = b"\0binary-model\xff";
+    fs::write(ui.path().join("widget.tsx"), component_bytes).unwrap();
+    fs::write(assets.path().join("model.glb"), asset_bytes).unwrap();
+    let asset_manifest = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 2,
+        "id": "org.example.assets",
+        "name": "assets",
+        "items": [{
+            "id": "model", "version": "1.0.0", "kind": "asset",
+            "files": [{
+                "source": "model.glb", "target": "models/model.glb",
+                "sha256": format!("{:x}", Sha256::digest(asset_bytes)),
+                "size": asset_bytes.len()
+            }]
+        }]
+    }))
+    .unwrap();
+    let asset_manifest_path = assets.path().join("registry.json");
+    fs::write(&asset_manifest_path, &asset_manifest).unwrap();
+    let ui_manifest_path = ui.path().join("registry.json");
+    fs::write(
+        &ui_manifest_path,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "id": "org.example.ui",
+            "name": "ui",
+            "items": [{
+                "id": "widget", "version": "1.0.0", "kind": "component",
+                "files": [{
+                    "source": "widget.tsx", "target": "components/widget.tsx",
+                    "sha256": format!("{:x}", Sha256::digest(component_bytes)),
+                    "size": component_bytes.len()
+                }],
+                "dependencies": [{
+                    "providerId": "org.example.assets", "itemId": "model",
+                    "version": "1.0.0",
+                    "manifestSha256": format!("{:x}", Sha256::digest(&asset_manifest))
+                }],
+                "packages": [{"name":"react","spec":"^18.2.0","kind":"peer"}]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "registries": {
+                "ui": {"source": ui_manifest_path},
+                "assets": {"source": asset_manifest_path}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let project_path = project.path().display().to_string();
+    let global_path = global.path();
+    let output = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "widget",
+            "--registry",
+            "ui",
+            "--project",
+            &project_path,
+            "--json",
+        ],
+        global_path,
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["command"], "add");
+    assert_eq!(report["data"]["items"].as_array().unwrap().len(), 2);
+    assert_eq!(report["data"]["items"][0]["itemId"], "model");
+    assert_eq!(report["data"]["items"][1]["itemId"], "widget");
+    assert_eq!(report["data"]["packages"][0]["name"], "react");
+    assert_eq!(
+        report["data"]["packages"][0]["requirements"][0]["kind"],
+        "peer"
+    );
+    assert_eq!(
+        report["data"]["packages"][0]["suggestions"]["npm"][0],
+        "npm install 'react@^18.2.0'"
+    );
+    assert_eq!(
+        fs::read(project.path().join("components/widget.tsx")).unwrap(),
+        component_bytes
+    );
+    assert_eq!(
+        fs::read(project.path().join("models/model.glb")).unwrap(),
+        asset_bytes
+    );
+    assert!(!project.path().join("package.json").exists());
+    let lock_path = project.path().join("friladd.lock.json");
+    let first_lock = fs::read(&lock_path).unwrap();
+    let lock = friladd::lockfile::Lock::parse(&first_lock).unwrap();
+    assert_eq!(lock.items.len(), 2);
+    let root_record = lock
+        .items
+        .iter()
+        .find(|item| item.item_id == "widget")
+        .unwrap();
+    assert_eq!(root_record.dependencies.len(), 1);
+    assert_eq!(root_record.dependencies[0].item_id, "model");
+    assert_eq!(
+        lock.items
+            .iter()
+            .find(|item| item.item_id == "model")
+            .unwrap()
+            .files[0]
+            .installed
+            .size,
+        asset_bytes.len() as u64
+    );
+
+    let repeat = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "widget",
+            "--registry",
+            "ui",
+            "--project",
+            &project_path,
+            "--json",
+        ],
+        global_path,
+    );
+    assert_eq!(repeat.status.code(), Some(0), "{repeat:?}");
+    let repeated: serde_json::Value = serde_json::from_slice(&repeat.stdout).unwrap();
+    assert!(
+        repeated["data"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file["action"] == "unchanged")
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), first_lock);
+
+    let cannot_remove_dependency = run_with_config(
+        project.path(),
+        &["remove", "assets/model", "--project", &project_path],
+        global_path,
+    );
+    assert_eq!(cannot_remove_dependency.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&cannot_remove_dependency.stderr).contains("depends"));
+    assert_eq!(
+        fs::read(project.path().join("models/model.glb")).unwrap(),
+        asset_bytes
+    );
+
+    fs::remove_file(project.path().join("components/widget.tsx")).unwrap();
+    fs::remove_file(project.path().join("models/model.glb")).unwrap();
+    let restored = run_with_config(
+        project.path(),
+        &["restore", "ui/widget", "--project", &project_path, "--json"],
+        global_path,
+    );
+    assert_eq!(restored.status.code(), Some(0), "{restored:?}");
+    assert_eq!(
+        fs::read(project.path().join("components/widget.tsx")).unwrap(),
+        component_bytes
+    );
+    assert_eq!(
+        fs::read(project.path().join("models/model.glb")).unwrap(),
+        asset_bytes
+    );
+
+    let removed_root = run_with_config(
+        project.path(),
+        &["remove", "ui/widget", "--project", &project_path],
+        global_path,
+    );
+    assert_eq!(removed_root.status.code(), Some(0), "{removed_root:?}");
+    assert!(!project.path().join("components/widget.tsx").exists());
+    assert_eq!(
+        fs::read(project.path().join("models/model.glb")).unwrap(),
+        asset_bytes
+    );
+    let retained = friladd::lockfile::Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(retained.items.len(), 1);
+    assert_eq!(retained.items[0].item_id, "model");
+    let removed_dependency = run_with_config(
+        project.path(),
+        &["remove", "assets/model", "--project", &project_path],
+        global_path,
+    );
+    assert_eq!(
+        removed_dependency.status.code(),
+        Some(0),
+        "{removed_dependency:?}"
+    );
+    assert!(!project.path().join("models/model.glb").exists());
+}
+
+#[test]
+fn dependency_add_rejects_missing_provider_and_cycles_without_project_writes() {
+    use sha2::{Digest, Sha256};
+
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    fs::write(provider.path().join("root.bin"), b"root").unwrap();
+    let manifest = provider.path().join("registry.json");
+    let write_manifest = |dependencies: serde_json::Value| {
+        fs::write(
+            &manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "id": "org.example.graph",
+                "name": "graph",
+                "items": [{
+                    "id": "root", "version": "1.0.0", "kind": "component",
+                    "files": [{
+                        "source":"root.bin", "target":"root.bin",
+                        "sha256":format!("{:x}", Sha256::digest(b"root")), "size":4
+                    }],
+                    "dependencies": dependencies
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    let source = manifest.display().to_string();
+    let project_path = project.path().display().to_string();
+    write_manifest(serde_json::json!([{
+        "providerId":"org.example.absent", "itemId":"missing", "version":"1.0.0",
+        "manifestSha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }]));
+    let missing = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "root",
+            "--registry",
+            &source,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("Missing provider snapshot"));
+    assert!(!project.path().join("root.bin").exists());
+    assert!(!project.path().join("friladd.lock.json").exists());
+    assert!(!project.path().join(".friladd").exists());
+
+    write_manifest(serde_json::json!([{
+        "providerId":"org.example.graph", "itemId":"root", "version":"1.0.0"
+    }]));
+    let cycle = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "root",
+            "--registry",
+            &source,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(cycle.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&cycle.stderr).contains("Cycle in internal dependencies"));
+    assert!(!project.path().join("root.bin").exists());
+    assert!(!project.path().join("friladd.lock.json").exists());
+}
+
+#[test]
+fn cross_registry_dependency_resolution_rejects_ambiguous_and_stale_snapshots() {
+    use sha2::{Digest, Sha256};
+
+    let root_registry = tempdir().unwrap();
+    let first = tempdir().unwrap();
+    let second = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let asset = b"shared asset";
+    fs::write(first.path().join("asset.bin"), asset).unwrap();
+    fs::write(second.path().join("asset.bin"), asset).unwrap();
+    let asset_manifest = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion":2,"id":"org.example.assets","name":"assets",
+        "items":[{"id":"asset","version":"1.0.0","kind":"asset","files":[{"source":"asset.bin","target":"asset.bin","sha256":format!("{:x}",Sha256::digest(asset)),"size":asset.len()}]}]
+    }))
+    .unwrap();
+    let first_manifest = first.path().join("registry.json");
+    let second_manifest = second.path().join("registry.json");
+    fs::write(&first_manifest, &asset_manifest).unwrap();
+    fs::write(&second_manifest, &asset_manifest).unwrap();
+    let root_file = b"root";
+    fs::write(root_registry.path().join("root.bin"), root_file).unwrap();
+    let root_manifest = root_registry.path().join("registry.json");
+    let write_root = |digest: String| {
+        fs::write(
+            &root_manifest,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion":2,"id":"org.example.root","name":"root",
+                "items":[{"id":"root","version":"1.0.0","kind":"component","files":[{"source":"root.bin","target":"root.bin","sha256":format!("{:x}",Sha256::digest(root_file)),"size":root_file.len()}],"dependencies":[{"providerId":"org.example.assets","itemId":"asset","version":"1.0.0","manifestSha256":digest}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    let exact_digest = format!("{:x}", Sha256::digest(&asset_manifest));
+    write_root(exact_digest);
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1,
+            "registries":{
+                "first":{"source":first_manifest},
+                "second":{"source":second_manifest}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let project_path = project.path().display().to_string();
+    let root_source = root_manifest.display().to_string();
+    let ambiguous = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "root",
+            "--registry",
+            &root_source,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(ambiguous.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("Ambiguous provider snapshot"));
+    assert!(!project.path().join("root.bin").exists());
+    assert!(!project.path().join("asset.bin").exists());
+    assert!(!project.path().join("friladd.lock.json").exists());
+
+    write_root("0".repeat(64));
+    let stale = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "root",
+            "--registry",
+            &root_source,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(stale.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("Stale provider snapshot"));
+    assert!(!project.path().join("root.bin").exists());
+    assert!(!project.path().join("friladd.lock.json").exists());
+    assert!(!project.path().join(".friladd").exists());
+}
+
+#[test]
+fn dependency_graph_preflights_target_collisions_and_aggregate_download_bounds() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let manifest = provider.path().join("registry.json");
+    let root_file = serde_json::json!({
+        "id":"root","version":"1.0.0","kind":"component",
+        "files":[{"source":"root.bin","target":"root.bin","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":4}],
+        "dependencies":[
+            {"providerId":"org.example.bounds","itemId":"first","version":"1.0.0"},
+            {"providerId":"org.example.bounds","itemId":"second","version":"1.0.0"}
+        ]
+    });
+    let make_item = |id: &str, target: &str, dependencies: serde_json::Value| {
+        serde_json::json!({
+            "id":id,"version":"1.0.0","kind":"asset",
+            "files":[{"source":format!("{id}.bin"),"target":target,"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":4}],
+            "dependencies":dependencies
+        })
+    };
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":2,"id":"org.example.bounds","name":"bounds",
+            "items":[
+                root_file,
+                make_item("first","shared.bin",serde_json::json!([])),
+                make_item("second","shared.bin",serde_json::json!([]))
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let source = manifest.display().to_string();
+    let project_path = project.path().display().to_string();
+    let collision = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "root",
+            "--registry",
+            &source,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(collision.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&collision.stderr).contains("collision"));
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+
+    let huge_items = (0..6)
+        .map(|index| {
+            serde_json::json!({
+                "id":format!("node-{index}"),"version":"1.0.0","kind":"asset",
+                "files":[{"source":format!("large-{index}.bin"),"target":format!("large-{index}.bin"),"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","size":100*1024*1024}],
+                "dependencies":if index == 0 { (1..6).map(|dep| serde_json::json!({"providerId":"org.example.bounds","itemId":format!("node-{dep}"),"version":"1.0.0"})).collect::<Vec<_>>() } else { Vec::new() }
+            })
+        })
+        .collect::<Vec<_>>();
+    let huge_root = provider.path().join("huge.json");
+    fs::write(
+        &huge_root,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":2,"id":"org.example.bounds","name":"bounds","items":huge_items
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let huge_source = huge_root.display().to_string();
+    let bounded = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "node-0",
+            "--registry",
+            &huge_source,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(bounded.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&bounded.stderr).contains("512 MiB acquisition limit"));
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn update_reconciles_the_dependency_graph_in_one_dry_run_and_transaction() {
+    use sha2::{Digest, Sha256};
+
+    let ui = tempdir().unwrap();
+    let assets = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let asset_bytes = b"pinned model";
+    fs::write(assets.path().join("model.bin"), asset_bytes).unwrap();
+    let asset_manifest_path = assets.path().join("registry.json");
+    let asset_manifest_for = |version: &str, bytes: &[u8]| {
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "id": "org.example.assets",
+            "name": "assets",
+            "items": [{
+                "id":"model", "version":version, "kind":"asset",
+                "files":[{"source":"model.bin","target":"models/model.bin","sha256":format!("{:x}",Sha256::digest(bytes)),"size":bytes.len()}]
+            }]
+        }))
+        .unwrap()
+    };
+    let asset_manifest = asset_manifest_for("1.0.0", asset_bytes);
+    fs::write(&asset_manifest_path, &asset_manifest).unwrap();
+    let ui_manifest_path = ui.path().join("registry.json");
+    let component_file = ui.path().join("widget.tsx");
+    let write_component = |version: &str, bytes: &[u8], dependency_manifest: &[u8]| {
+        fs::write(&component_file, bytes).unwrap();
+        fs::write(
+            &ui_manifest_path,
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion":2,
+                "id":"org.example.ui",
+                "name":"ui",
+                "items":[{
+                    "id":"widget", "version":version, "kind":"component",
+                    "files":[{"source":"widget.tsx","target":"components/widget.tsx","sha256":format!("{:x}",Sha256::digest(bytes)),"size":bytes.len()}],
+                    "dependencies":[{"providerId":"org.example.assets","itemId":"model","version":if version == "1.0.0" {"1.0.0"} else {"2.0.0"},"manifestSha256":format!("{:x}",Sha256::digest(dependency_manifest))}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    };
+    write_component("1.0.0", b"export const Widget = 1;\n", &asset_manifest);
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":1,
+            "registries":{
+                "ui":{"source":ui_manifest_path},
+                "assets":{"source":asset_manifest_path}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let project_path = project.path().display().to_string();
+    let config = global.path();
+    let source_v1 = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "widget",
+            "--registry",
+            "ui",
+            "--project",
+            &project_path,
+        ],
+        config,
+    );
+    assert_eq!(source_v1.status.code(), Some(0), "{source_v1:?}");
+    let lock_path = project.path().join("friladd.lock.json");
+    let old_lock = fs::read(&lock_path).unwrap();
+    let old_component = fs::read(project.path().join("components/widget.tsx")).unwrap();
+
+    let asset_bytes_v2 = b"updated model";
+    fs::write(assets.path().join("model.bin"), asset_bytes_v2).unwrap();
+    let asset_manifest_v2 = asset_manifest_for("2.0.0", asset_bytes_v2);
+    fs::write(&asset_manifest_path, &asset_manifest_v2).unwrap();
+    write_component("2.0.0", b"export const Widget = 2;\n", &asset_manifest_v2);
+    let dry_run = run_with_config(
+        project.path(),
+        &[
+            "update",
+            "widget",
+            "--registry",
+            "ui",
+            "--version",
+            "2.0.0",
+            "--project",
+            &project_path,
+            "--dry-run",
+            "--json",
+        ],
+        config,
+    );
+    assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
+    let dry_report: serde_json::Value = serde_json::from_slice(&dry_run.stdout).unwrap();
+    assert_eq!(dry_report["command"], "update");
+    assert_eq!(
+        dry_report["data"]["dependencyGraph"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        dry_report["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["itemId"] == "widget")
+            .unwrap()["actions"][0]["action"],
+        "replace"
+    );
+    assert_eq!(
+        dry_report["data"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["itemId"] == "model")
+            .unwrap()["actions"][0]["action"],
+        "replace"
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), old_lock);
+    assert_eq!(
+        fs::read(project.path().join("components/widget.tsx")).unwrap(),
+        old_component
+    );
+    assert_eq!(
+        fs::read(project.path().join("models/model.bin")).unwrap(),
+        asset_bytes
+    );
+
+    let updated = run_with_config(
+        project.path(),
+        &[
+            "update",
+            "widget",
+            "--registry",
+            "ui",
+            "--version",
+            "2.0.0",
+            "--project",
+            &project_path,
+            "--json",
+        ],
+        config,
+    );
+    assert_eq!(updated.status.code(), Some(0), "{updated:?}");
+    assert_eq!(
+        fs::read(project.path().join("components/widget.tsx")).unwrap(),
+        b"export const Widget = 2;\n"
+    );
+    assert_eq!(
+        fs::read(project.path().join("models/model.bin")).unwrap(),
+        asset_bytes_v2
+    );
+    let updated_report: serde_json::Value = serde_json::from_slice(&updated.stdout).unwrap();
+    assert_eq!(updated_report["command"], "update");
+    let updated_lock = friladd::lockfile::Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    let component = updated_lock
+        .items
+        .iter()
+        .find(|item| item.item_id == "widget")
+        .unwrap();
+    assert_eq!(component.version.as_deref(), Some("2.0.0"));
+    assert_eq!(component.dependencies.len(), 1);
+    assert_eq!(component.dependencies[0].version, "2.0.0");
+    assert_eq!(
+        updated_lock
+            .items
+            .iter()
+            .find(|item| item.item_id == "model")
+            .unwrap()
+            .version
+            .as_deref(),
+        Some("2.0.0")
+    );
+
+    let lock_after_update = fs::read(&lock_path).unwrap();
+    let updated_asset_bytes = fs::read(project.path().join("models/model.bin")).unwrap();
+    let asset_bytes_v3 = b"third model";
+    fs::write(assets.path().join("model.bin"), asset_bytes_v3).unwrap();
+    let asset_manifest_v3 = asset_manifest_for("3.0.0", asset_bytes_v3);
+    fs::write(&asset_manifest_path, &asset_manifest_v3).unwrap();
+    let blocked_dependency_update = run_with_config(
+        project.path(),
+        &[
+            "update",
+            "model",
+            "--registry",
+            "assets",
+            "--version",
+            "3.0.0",
+            "--project",
+            &project_path,
+        ],
+        config,
+    );
+    assert_eq!(blocked_dependency_update.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&blocked_dependency_update.stderr).contains("outside this graph")
+    );
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_after_update);
+    assert_eq!(
+        fs::read(project.path().join("models/model.bin")).unwrap(),
+        updated_asset_bytes
+    );
+}
+
+#[test]
+fn package_requirement_conflicts_fail_before_any_project_write() {
+    use sha2::{Digest, Sha256};
+
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    fs::write(provider.path().join("component.bin"), b"component").unwrap();
+    fs::write(provider.path().join("dependency.bin"), b"dependency").unwrap();
+    let manifest = provider.path().join("registry.json");
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":2,
+            "id":"org.example.packages",
+            "name":"packages",
+            "items":[
+                {
+                    "id":"component","version":"1.0.0","kind":"component",
+                    "files":[{"source":"component.bin","target":"component.bin","sha256":format!("{:x}",Sha256::digest(b"component")),"size":9}],
+                    "dependencies":[{"providerId":"org.example.packages","itemId":"shared","version":"1.0.0"}],
+                    "packages":[{"name":"react","spec":"^18.2.0","kind":"peer"}]
+                },
+                {
+                    "id":"shared","version":"1.0.0","kind":"asset",
+                    "files":[{"source":"dependency.bin","target":"dependency.bin","sha256":format!("{:x}",Sha256::digest(b"dependency")),"size":10}],
+                    "packages":[{"name":"react","spec":"~19.0.0","kind":"runtime"}]
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let source = manifest.display().to_string();
+    let project_path = project.path().display().to_string();
+    let output = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "component",
+            "--registry",
+            &source,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Conflicting package requirements for react")
+    );
+    assert!(!project.path().join("component.bin").exists());
+    assert!(!project.path().join("dependency.bin").exists());
+    assert!(!project.path().join("friladd.lock.json").exists());
+    assert!(!project.path().join(".friladd").exists());
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn diamond_dependencies_share_one_owned_item_and_remove_retains_orphans() {
+    use sha2::{Digest, Sha256};
+
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    for (name, bytes) in [
+        ("root.bin", b"root".as_slice()),
+        ("first.bin", b"first".as_slice()),
+        ("second.bin", b"second".as_slice()),
+        ("shared.bin", b"shared".as_slice()),
+    ] {
+        fs::write(provider.path().join(name), bytes).unwrap();
+    }
+    let manifest = provider.path().join("registry.json");
+    let declarations = [
+        ("root", "root.bin", "root.bin"),
+        ("first", "first.bin", "first.bin"),
+        ("second", "second.bin", "second.bin"),
+        ("shared", "shared.bin", "shared.bin"),
+    ];
+    let items = declarations
+        .iter()
+        .map(|(id, source, target)| {
+            let bytes = fs::read(provider.path().join(source)).unwrap();
+            let dependencies = match *id {
+                "root" => serde_json::json!([
+                    {"providerId":"org.example.diamond","itemId":"first","version":"1.0.0"},
+                    {"providerId":"org.example.diamond","itemId":"second","version":"1.0.0"}
+                ]),
+                "first" | "second" => serde_json::json!([
+                    {"providerId":"org.example.diamond","itemId":"shared","version":"1.0.0"}
+                ]),
+                _ => serde_json::json!([]),
+            };
+            serde_json::json!({
+                "id":id,"version":"1.0.0","kind":"other",
+                "files":[{"source":source,"target":target,"sha256":format!("{:x}",Sha256::digest(&bytes)),"size":bytes.len()}],
+                "dependencies":dependencies
+            })
+        })
+        .collect::<Vec<_>>();
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion":2,"id":"org.example.diamond","name":"diamond","items":items
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let source = manifest.display().to_string();
+    let project_path = project.path().display().to_string();
+    let add = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "root",
+            "--registry",
+            &source,
+            "--project",
+            &project_path,
+            "--json",
+        ],
+        global.path(),
+    );
+    assert_eq!(add.status.code(), Some(0), "{add:?}");
+    let add_report: serde_json::Value = serde_json::from_slice(&add.stdout).unwrap();
+    let order = add_report["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["itemId"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(order, ["shared", "first", "second", "root"]);
+    let lock_path = project.path().join("friladd.lock.json");
+    let lock = friladd::lockfile::Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(lock.items.len(), 4);
+    assert_eq!(
+        lock.items
+            .iter()
+            .filter(|item| item.item_id == "shared")
+            .count(),
+        1
+    );
+
+    let remove_root = run_with_config(
+        project.path(),
+        &["remove", "root", "--project", &project_path],
+        global.path(),
+    );
+    assert_eq!(remove_root.status.code(), Some(0), "{remove_root:?}");
+    assert!(project.path().join("shared.bin").exists());
+    let cannot_remove_shared = run_with_config(
+        project.path(),
+        &["remove", "shared", "--project", &project_path],
+        global.path(),
+    );
+    assert_eq!(cannot_remove_shared.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&cannot_remove_shared.stderr).contains("depends"));
+
+    let remove_first = run_with_config(
+        project.path(),
+        &["remove", "first", "--project", &project_path],
+        global.path(),
+    );
+    assert_eq!(remove_first.status.code(), Some(0), "{remove_first:?}");
+    let still_shared = friladd::lockfile::Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    assert!(
+        still_shared
+            .items
+            .iter()
+            .any(|item| item.item_id == "shared")
+    );
+    assert!(project.path().join("shared.bin").exists());
+    let remove_second = run_with_config(
+        project.path(),
+        &["remove", "second", "--project", &project_path],
+        global.path(),
+    );
+    assert_eq!(remove_second.status.code(), Some(0), "{remove_second:?}");
+    assert!(project.path().join("shared.bin").exists());
+    let remove_orphan = run_with_config(
+        project.path(),
+        &["remove", "shared", "--project", &project_path],
+        global.path(),
+    );
+    assert_eq!(remove_orphan.status.code(), Some(0), "{remove_orphan:?}");
+    assert!(!project.path().join("shared.bin").exists());
+}
+
 fn v1_manifest(files: &[(&str, &str, &[u8])]) -> String {
     use sha2::{Digest, Sha256};
     serde_json::json!({
