@@ -1,6 +1,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -21,7 +22,7 @@ module.exports = function launch(commandName) {
     process.exit(1);
   }
 
-  const binaryPath = path.join(__dirname, '..', 'native', binaryName);
+  let binaryPath = path.join(__dirname, '..', 'native', binaryName);
   if (!fs.existsSync(binaryPath)) {
     console.error(
       `FrilAdd's ${platform} executable is missing from this npm package. Reinstall friladd@${require('../package.json').version} or report the incomplete package at https://github.com/FrilLab/friladd/issues.`,
@@ -29,11 +30,26 @@ module.exports = function launch(commandName) {
     process.exit(1);
   }
 
+  let temporaryDirectory;
+  if (process.platform === 'win32') {
+    try {
+      temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'fril-'));
+      const shortBinaryPath = path.join(temporaryDirectory, binaryName);
+      fs.copyFileSync(binaryPath, shortBinaryPath);
+      binaryPath = shortBinaryPath;
+    } catch (error) {
+      if (temporaryDirectory) fs.rmSync(temporaryDirectory, { recursive: true, force: true });
+      console.error(`Could not prepare FrilAdd's native executable: ${error.message}`);
+      process.exit(1);
+    }
+  }
+
   const result = spawnSync(binaryPath, process.argv.slice(2), {
     env: { ...process.env, FRILADD_LAUNCHER_COMMAND: commandName },
     stdio: 'inherit',
     windowsHide: true,
   });
+  if (temporaryDirectory) fs.rmSync(temporaryDirectory, { recursive: true, force: true });
   if (result.error) {
     console.error(
       `Could not start FrilAdd's native executable: ${result.error.message}`,
