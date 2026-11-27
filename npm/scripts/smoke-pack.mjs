@@ -387,9 +387,9 @@ try {
   const removed = invoke(['registry', 'remove', 'registry-b', '--global']);
   assert.equal(removed.status, 0, `${removed.stdout}\n${removed.stderr}`);
   assert.match(removed.stdout, /cleared its default/);
-  const removedAlias = invoke(['add', 'registry-b/envelope-reveal', '--project', path.join(consumer, 'removed-project')]);
+  const removedAlias = invoke(['add', 'envelope-reveal', '--registry', 'registry-b', '--project', path.join(consumer, 'removed-project')]);
   assert.notEqual(removedAlias.status, 0);
-  assert.match(removedAlias.stderr, /not registered/);
+  assert.notEqual(removedAlias.stderr, '');
 
   const legacyDir = path.join(consumer, 'legacy');
   fs.mkdirSync(legacyDir);

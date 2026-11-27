@@ -11,9 +11,11 @@ use std::{
     time::Duration,
 };
 
+/// Provider manifests and artifacts remain pinned to reviewed GitHub revisions.
 pub const PUBLIC_REGISTRY_HOST: &str = "raw.githubusercontent.com";
-pub const PUBLIC_DIRECTORY_URL: &str =
-    "https://raw.githubusercontent.com/FrilLab/frilregistry/main/registries.json";
+/// The directory bootstrap has its own FrilLab-owned trust root and transport policy.
+pub const PUBLIC_DIRECTORY_HOST: &str = "registry.frillab.com";
+pub const PUBLIC_DIRECTORY_URL: &str = "https://registry.frillab.com/registries.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -177,7 +179,7 @@ pub fn fetch(
         return Err("Public response limit must be greater than zero".into());
     }
     let checked = approved_repository.validate_manifest_url(url.as_str())?;
-    fetch_checked_url(checked, max_bytes)
+    fetch_checked_url(checked, max_bytes, PUBLIC_REGISTRY_HOST)
 }
 
 pub fn fetch_artifact(
@@ -190,32 +192,60 @@ pub fn fetch_artifact(
         return Err("Public response limit must be greater than zero".into());
     }
     let checked = approved_repository.validate_artifact_url(manifest_url, url)?;
-    fetch_checked_url(checked, max_bytes)
+    fetch_checked_url(checked, max_bytes, PUBLIC_REGISTRY_HOST)
 }
 
 /// Fetches only FrilLab's compiled canonical static directory endpoint.
 pub fn fetch_directory() -> Result<Vec<u8>, String> {
-    let checked = validate_public_url(PUBLIC_DIRECTORY_URL)?;
-    if checked.as_str() != PUBLIC_DIRECTORY_URL
-        || checked.path() != "/FrilLab/frilregistry/main/registries.json"
-    {
+    let checked = validate_directory_url(PUBLIC_DIRECTORY_URL)?;
+    if checked.as_str() != PUBLIC_DIRECTORY_URL || checked.path() != "/registries.json" {
         return Err("Compiled public directory endpoint is invalid".into());
     }
-    fetch_checked_url(checked, crate::public_directory::MAX_DIRECTORY_BYTES)
+    fetch_checked_url(
+        checked,
+        crate::public_directory::MAX_DIRECTORY_BYTES,
+        PUBLIC_DIRECTORY_HOST,
+    )
 }
 
-fn fetch_checked_url(checked: Url, max_bytes: usize) -> Result<Vec<u8>, String> {
+fn validate_directory_url(raw_url: &str) -> Result<Url, String> {
+    if raw_url != PUBLIC_DIRECTORY_URL {
+        return Err("Public directory URL must be the compiled FrilLab endpoint".into());
+    }
+    let url = Url::parse(raw_url).map_err(|_| "Invalid public directory HTTPS URL")?;
+    if url.scheme() != "https"
+        || url.host_str() != Some(PUBLIC_DIRECTORY_HOST)
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("Public directory must use the canonical FrilLab HTTPS origin".into());
+    }
+    Ok(url)
+}
+
+fn fetch_checked_url(
+    checked: Url,
+    max_bytes: usize,
+    expected_host: &str,
+) -> Result<Vec<u8>, String> {
     if max_bytes == 0 {
         return Err("Public response limit must be greater than zero".into());
     }
-    let addresses = resolve_public_addresses(checked.host_str().ok_or("Missing public host")?)?;
+    let host = checked.host_str().ok_or("Missing public host")?;
+    if host != expected_host {
+        return Err("Public URL host does not match its transport policy".into());
+    }
+    let addresses = resolve_public_addresses(host, expected_host)?;
     let builder = Client::builder()
         .https_only(true)
         .no_proxy()
         .connect_timeout(CONNECT_TIMEOUT)
         .timeout(REQUEST_TIMEOUT)
         .redirect(Policy::none())
-        .resolve_to_addrs(PUBLIC_REGISTRY_HOST, &addresses);
+        .resolve_to_addrs(expected_host, &addresses);
     // Avoid inherited system proxy settings and preserve certificate validation for
     // the URL hostname while the resolver is pinned to the checked socket addresses.
     let client = builder
@@ -278,8 +308,10 @@ pub fn fetch_verified_manifest(
     Ok(bytes)
 }
 
-fn resolve_public_addresses(host: &str) -> Result<Vec<SocketAddr>, String> {
-    if host != PUBLIC_REGISTRY_HOST {
+fn resolve_public_addresses(host: &str, expected_host: &str) -> Result<Vec<SocketAddr>, String> {
+    if host != expected_host
+        || !matches!(expected_host, PUBLIC_REGISTRY_HOST | PUBLIC_DIRECTORY_HOST)
+    {
         return Err("Public host is not allowlisted".into());
     }
     let addresses: Vec<_> = (host, 443)
@@ -379,10 +411,21 @@ mod tests {
         ] {
             assert!(validate_public_url(value).is_err(), "accepted {value}");
         }
+        assert!(validate_public_url(PUBLIC_DIRECTORY_URL).is_err());
         assert_eq!(
-            validate_public_url(PUBLIC_DIRECTORY_URL).unwrap().as_str(),
+            validate_directory_url(PUBLIC_DIRECTORY_URL)
+                .unwrap()
+                .as_str(),
             PUBLIC_DIRECTORY_URL
         );
+        for value in [
+            "https://registry.frillab.com.evil.test/registries.json",
+            "http://registry.frillab.com/registries.json",
+            "https://registry.frillab.com/other.json",
+            "https://registry.frillab.com/registries.json?x=1",
+        ] {
+            assert!(validate_directory_url(value).is_err(), "accepted {value}");
+        }
         assert!(
             validate_public_url(
                 "https://raw.githubusercontent.com/Other/frilregistry/main/registries.json"

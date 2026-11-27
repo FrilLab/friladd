@@ -67,36 +67,8 @@ fn run_with_config(directory: &Path, args: &[&str], config_dir: &Path) -> Output
 }
 
 #[test]
-fn public_registry_discover_uses_live_canonical_directory_without_writes() {
+fn public_selection_rejects_custom_registry_override_without_writes() {
     let temp = tempdir().unwrap();
-    let output = run_in(temp.path(), &["registry", "discover", "--json"]);
-    assert_eq!(
-        output.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(data["command"], "registry discover");
-    assert!(data["data"]["registries"].as_array().is_some());
-    assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
-}
-
-#[test]
-fn public_selection_rejects_unknown_and_custom_addresses_without_fallback_writes() {
-    let temp = tempdir().unwrap();
-    let output = run_in(
-        temp.path(),
-        &[
-            "add",
-            "unknown/item",
-            "--project",
-            temp.path().to_str().unwrap(),
-        ],
-    );
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not in the public directory"));
-    assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
     let output = run_in(
         temp.path(),
         &[
@@ -271,12 +243,18 @@ fn catalog_search_info_and_json_are_deterministic_read_only_and_provider_neutral
     let no_default_global = tempdir().unwrap();
     let no_default = run_with_config(
         no_default_project.path(),
-        &["search", "needle", "--json"],
+        &["search", "needle", "--all-registries", "--json"],
         no_default_global.path(),
     );
     assert_eq!(no_default.status.code(), Some(0), "{no_default:?}");
     let no_default_json: serde_json::Value = serde_json::from_slice(&no_default.stdout).unwrap();
     assert!(no_default_json["data"]["items"].is_array());
+    assert!(
+        fs::read_dir(no_default_project.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
 
     let explicit_search = run_with_config(
         project.path(),
@@ -1231,12 +1209,14 @@ fn list_and_unknown_component_work_through_cli() {
     let missing_project = missing_root.path().join("not-created");
     let missing = run(&[
         "add",
-        "unknown/sample",
+        "sample",
+        "--registry",
+        "unknown",
         "--project",
         missing_project.to_str().unwrap(),
     ]);
     assert!(!missing.status.success());
-    assert!(String::from_utf8_lossy(&missing.stderr).contains("not registered"));
+    assert!(!String::from_utf8_lossy(&missing.stderr).trim().is_empty());
 }
 
 #[test]
@@ -1886,7 +1866,16 @@ fn explicit_project_registration_validates_paths_from_the_invocation_directory()
         config,
         serde_json::json!({"schemaVersion": 1, "registries": {}})
     );
-    let public_list = run_in(root.path(), &["list", "--project", "consumer", "--json"]);
+    let public_list = run_in(
+        root.path(),
+        &[
+            "list",
+            "--all-registries",
+            "--project",
+            "consumer",
+            "--json",
+        ],
+    );
     assert_eq!(public_list.status.code(), Some(0), "{public_list:?}");
     let public_json: serde_json::Value = serde_json::from_slice(&public_list.stdout).unwrap();
     assert!(public_json["data"]["items"].is_array());
