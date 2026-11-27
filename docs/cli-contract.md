@@ -24,6 +24,18 @@ The commands in this section are implemented in the source tree. Published npm r
 | `fril remove ITEM [--project DIRECTORY] [--dry-run] [--json]` | Remove one lock-owned item offline. Delete only unchanged files, report already-missing files, and remove ownership in the same transaction. Refuse modified, unsafe or unreadable targets and items still required by another lock item. Dependencies that become unreferenced are retained by default and can be removed explicitly. |
 | `fril restore [ITEM] [--project DIRECTORY] [--dry-run] [--json]` | Restore selected or all missing owned files from their exact locked locators, digests and sizes. Selecting an item includes its transitive dependency closure from the lock. Unchanged files are no-ops. Refuse modified, unsafe or unreadable targets and fail before writes if any source cannot be verified. Restore is registry-independent and uses the exact locked snapshots. |
 
+## Proposed public directory contract (not yet implemented)
+
+The following commands and behavior are specified for the 0.2.x work in issues #39–#43. They are not currently shipped. The static directory schema and trust boundary are defined in [public-registry.md](public-registry.md) and [schema v1](schemas/public-directory-v1.schema.json). No canonical public endpoint is currently configured or claimed to be live.
+
+| Proposed command | Contract |
+| --- | --- |
+| `fril registry discover [REGISTRY] [--json]` | Read metadata from the single trusted directory. It does not fetch provider files, register aliases, or write config. Discovery errors are distinct from provider manifest errors. |
+| `fril list --public [--json]`, `fril search QUERY --public [--json]` | Search active approved official and community entries from directory metadata. `--public` conflicts with explicit registry selectors and `--all-registries`. Existing configured-only semantics remain unchanged. No partial success on directory failure. |
+| `fril info REGISTRY/ITEM`, `fril add REGISTRY/ITEM` | Prefer an explicit local alias if configured; otherwise resolve an active public entry. Never silently bypass a configured identity collision. No implicit provider choice for unqualified install. Official active entries need no prompt. Community installation requires affirmative identity-scoped approval bound to provider ID, publisher, origin, reviewed revision and digest. Generic `--yes` is not approval; dry run never persists it. Apply the same trust rule to dependencies. |
+
+With no configured default, ordinary list/search may use official entries only after a real canonical endpoint is deployed. Public selection requires the strict public transport and trust checks; explicitly selected custom/private registries retain their existing independent behavior. Offline lifecycle commands and locked exact restore never consult the directory.
+
 Exit status **0** means success, including help and version. Invalid usage and operational failures use **2**. Operational errors are written to stderr with an `Error:` prefix. A human-mode command may have printed progress or its plan before an error. CLI parsing errors include usage and go to stderr. Scripts should branch on exit status and use machine mode where available.
 
 ### Paths and precedence

@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "registries": [
+    {
+      "id": "frilcraft",
+      "displayName": "FrilCraft",
+      "description": "Example only; this is not a live directory entry.",
+      "registryUrl": "https://example.invalid/frilcraft/registry.json",
+      "repository": "https://example.invalid/frilcraft/registry",
+      "publisher": "FrilCraft maintainers (fixture)",
+      "tier": "official",
+      "status": "active",
+      "reviewedRevision": "0000000000000000000000000000000000000000",
+      "manifestSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "review": {
+        "reviewedAt": "2026-01-01T00:00:00Z",
+        "reviewer": "fixture-only",
+        "notes": "Illustrative schema fixture; not approval or provider qualification evidence."
+      }
+    }
+  ]
+}
