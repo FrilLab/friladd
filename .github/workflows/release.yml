@@ -140,6 +140,12 @@ jobs:
         with:
           name: friladd-npm-tarball
           path: ${{ runner.temp }}/release-assets
+      - name: Generate and verify SHA-256 checksums
+        shell: bash
+        run: |
+          cd "${{ runner.temp }}/release-assets"
+          sha256sum -- * > SHA256SUMS
+          sha256sum --check SHA256SUMS
       - name: Reject an existing release
         env:
           GH_TOKEN: ${{ github.token }}
