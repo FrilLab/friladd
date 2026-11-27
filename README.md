@@ -230,25 +230,9 @@ npx friladd add envelope-reveal --project ./my-app
 
 The URL above is a placeholder. Each manifest can expose selected source files; FrilAdd does not require developers to clone a provider repository. FrilAdd does not install declared npm dependencies; component authors should document those requirements.
 
-## Community badges
+## Community
 
-Show that your project uses FrilAdd by adding this optional badge to its README:
-
-[![Built with FrilAdd](branding/badges/built-with-friladd.svg)](https://github.com/FrilLab/friladd)
-
-```md
-[![Built with FrilAdd](https://raw.githubusercontent.com/FrilLab/friladd/main/branding/badges/built-with-friladd.svg)](https://github.com/FrilLab/friladd)
-```
-
-If you maintain a FrilAdd-compatible registry, you can use this badge instead:
-
-[![FrilAdd Registry](branding/badges/friladd-registry.svg)](https://github.com/FrilLab/friladd)
-
-```md
-[![FrilAdd Registry](https://raw.githubusercontent.com/FrilLab/friladd/main/branding/badges/friladd-registry.svg)](https://github.com/FrilLab/friladd)
-```
-
-These static SVG badges are hosted in this repository, use the FrilLab brand blue and white, and require no external badge service or additional package. They are self-declared usage or compatibility indicators, not official directory admission, publisher verification, security certification, or endorsement.
+Using FrilAdd in your project? See our [community badges and brand assets](docs/branding.md).
 
 ## Development and tests
 

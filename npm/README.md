@@ -15,3 +15,5 @@ fril add team-ui/button
 ```
 
 The npm package includes one native executable for each supported platform (macOS ARM64/x64, Linux x64, and Windows x64), but does not bundle example components, test fixtures, or a default Registry. The package remains `friladd`; use `npx friladd`, not `npx fril`. After a global install, use `fril` or `friladd`; when invoking the package through npx, use `npx friladd`. Register a Registry over HTTPS or use a local manifest file. Component `source` paths in a Registry Manifest must be relative; their bytes are checked against the declared SHA-256 digests before installation. See the [full documentation](https://github.com/FrilLab/friladd#readme) for registry setup, the manifest format, and the safety model.
+
+Optional [community badges and brand assets](https://github.com/FrilLab/friladd/blob/main/docs/branding.md) are available for projects using FrilAdd and compatible registry authors.
