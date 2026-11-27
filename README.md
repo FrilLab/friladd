@@ -234,21 +234,21 @@ The URL above is a placeholder. Each manifest can expose selected source files; 
 
 Show that your project uses FrilAdd by adding this optional badge to its README:
 
-[![Built with FrilAdd](https://img.shields.io/badge/Built%20with-FrilAdd-18181b)](https://github.com/FrilLab/friladd)
+[![Built with FrilAdd](branding/badges/built-with-friladd.svg)](https://github.com/FrilLab/friladd)
 
 ```md
-[![Built with FrilAdd](https://img.shields.io/badge/Built%20with-FrilAdd-18181b)](https://github.com/FrilLab/friladd)
+[![Built with FrilAdd](https://raw.githubusercontent.com/FrilLab/friladd/main/branding/badges/built-with-friladd.svg)](https://github.com/FrilLab/friladd)
 ```
 
 If you maintain a FrilAdd-compatible registry, you can use this badge instead:
 
-[![FrilAdd Registry](https://img.shields.io/badge/Registry-FrilAdd-18181b)](https://github.com/FrilLab/friladd)
+[![FrilAdd Registry](branding/badges/friladd-registry.svg)](https://github.com/FrilLab/friladd)
 
 ```md
-[![FrilAdd Registry](https://img.shields.io/badge/Registry-FrilAdd-18181b)](https://github.com/FrilLab/friladd)
+[![FrilAdd Registry](https://raw.githubusercontent.com/FrilLab/friladd/main/branding/badges/friladd-registry.svg)](https://github.com/FrilLab/friladd)
 ```
 
-These are static, self-declared badges hosted by Shields.io. They indicate usage or registry compatibility, not official directory admission, publisher verification, security certification, or endorsement. No CLI configuration or additional package is required.
+These static SVG badges are hosted in this repository, use the FrilLab brand blue and white, and require no external badge service or additional package. They are self-declared usage or compatibility indicators, not official directory admission, publisher verification, security certification, or endorsement.
 
 ## Development and tests
 
