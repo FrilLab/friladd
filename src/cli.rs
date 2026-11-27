@@ -135,6 +135,9 @@ struct RestoreArgs {
     /// Project root (defaults to the current directory).
     #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
+    /// Explicitly authorize each community provider restored from the lock.
+    #[arg(long = "trust-community", value_name = "REGISTRY_ID")]
+    trust_community: Vec<String>,
     /// Verify the transaction plan without writing.
     #[arg(long)]
     dry_run: bool,
@@ -409,30 +412,39 @@ fn selected_entry_manifest(loaded: &registry::LoadedRegistry) -> Result<String, 
 fn authorize_community(
     entry: &public_directory::DirectoryEntry,
     explicit: &[String],
-    project_root: &Path,
 ) -> Result<(), String> {
     if entry.tier != public_directory::Tier::Community {
         return Ok(());
     }
-    let lock = lockfile::load(project_root)?;
-    let identity = entry.public_identity();
-    if lock.lock().providers.iter().any(|p| {
-        p.public_identity.as_ref().is_some_and(|locked| {
-            locked.registry_id == identity.registry_id
-                && locked.tier == "community"
-                && locked.publisher == identity.publisher
-                && locked.repository == identity.repository
-        })
-    }) {
-        return Ok(());
-    }
-    if explicit.iter().any(|id| id == &entry.id) {
+    authorize_community_id(&entry.id, explicit)
+}
+
+fn authorize_community_id(registry_id: &str, explicit: &[String]) -> Result<(), String> {
+    if explicit.iter().any(|id| id == registry_id) {
         return Ok(());
     }
     Err(format!(
         "Community registry '{}' requires explicit trust. Re-run with --trust-community {} after reviewing its publisher and provenance.",
-        entry.id, entry.id
+        registry_id, registry_id
     ))
+}
+
+fn authorize_locked_community(
+    items: &[lockfile::Item],
+    providers: &[lockfile::Provider],
+    explicit: &[String],
+) -> Result<(), String> {
+    for item in items {
+        if let Some(identity) = providers
+            .iter()
+            .find(|provider| provider.provider_id == item.provider_id)
+            .and_then(|provider| provider.public_identity.as_ref())
+            .filter(|identity| identity.tier == "community")
+        {
+            authorize_community_id(&identity.registry_id, explicit)?;
+        }
+    }
+    Ok(())
 }
 
 fn public_catalog_entries(
@@ -509,7 +521,7 @@ mod public_trust_tests {
     use super::*;
 
     #[test]
-    fn community_consent_is_exact_and_identity_scoped() {
+    fn community_install_requires_invocation_consent_even_with_lock_provenance() {
         let temp = tempfile::tempdir().unwrap();
         let config_dir = temp.path().join("config");
         fs::create_dir(&config_dir).unwrap();
@@ -531,6 +543,28 @@ mod public_trust_tests {
             ..lockfile::Lock::default()
         };
         fs::write(project.join(lockfile::NAME), lock.encode().unwrap()).unwrap();
+        let locked_item = lockfile::Item {
+            provider_id: lock.providers[0].provider_id.clone(),
+            item_id: "sample".into(),
+            version: Some("1.0.0".into()),
+            manifest_source: identity.registry_url.clone(),
+            manifest_sha256: identity.manifest_sha256.clone(),
+            target_root: None,
+            dependencies: Vec::new(),
+            files: Vec::new(),
+        };
+        assert!(
+            authorize_locked_community(std::slice::from_ref(&locked_item), &lock.providers, &[])
+                .is_err()
+        );
+        assert!(
+            authorize_locked_community(
+                std::slice::from_ref(&locked_item),
+                &lock.providers,
+                &["community-tools".into()]
+            )
+            .is_ok()
+        );
         let entry = public_directory::DirectoryEntry {
             id: identity.registry_id.clone(),
             display_name: "Community".into(),
@@ -548,14 +582,41 @@ mod public_trust_tests {
                 notes: "review".into(),
             },
         };
-        assert!(authorize_community(&entry, &[], &project).is_ok());
+        assert!(authorize_community(&entry, &[]).is_err());
         let wrong = public_directory::DirectoryEntry {
             id: "other-id".into(),
             ..entry.clone()
         };
-        assert!(authorize_community(&wrong, &[], &project).is_err());
-        assert!(authorize_community(&wrong, &["community-tools".into()], &project).is_err());
-        assert!(authorize_community(&wrong, &["other-id".into()], &project).is_ok());
+        assert!(authorize_community(&wrong, &[]).is_err());
+        assert!(authorize_community(&wrong, &["community-tools".into()]).is_err());
+        assert!(authorize_community(&wrong, &["other-id".into()]).is_ok());
+    }
+
+    #[test]
+    fn official_lock_identity_uses_generic_frillab_namespace() {
+        let identity = public_directory::PublicIdentity {
+            registry_id: "frilphysics".into(),
+            publisher: "github:FrilLab".into(),
+            tier: "official".into(),
+            repository: "https://github.com/FrilLab/frilphysics".into(),
+            registry_url: format!(
+                "https://raw.githubusercontent.com/FrilLab/frilphysics/{}/registry.json",
+                "a".repeat(40)
+            ),
+            reviewed_revision: "a".repeat(40),
+            manifest_sha256: "b".repeat(64),
+        };
+        let lock = lockfile::Lock {
+            providers: vec![lockfile::Provider {
+                provider_id: lockfile::v1_provider_id(&identity.registry_url).unwrap(),
+                declared_source: identity.registry_url.clone(),
+                resolved_source: identity.registry_url.clone(),
+                manifest_sha256: identity.manifest_sha256.clone(),
+                public_identity: Some(identity),
+            }],
+            ..lockfile::Lock::default()
+        };
+        assert!(lock.encode().is_ok());
     }
 }
 
@@ -915,7 +976,7 @@ fn add(args: AddArgs) -> Result<(), String> {
                 if entry.status != public_directory::Status::Active {
                     return Err(format!("Public registry '{alias}' is not active"));
                 }
-                authorize_community(&entry, &args.trust_community, &project_root)?;
+                authorize_community(&entry, &args.trust_community)?;
                 let loaded = public_directory::PublicDirectory::load_manifest(&entry)?;
                 public_entry = Some(entry);
                 (
@@ -965,7 +1026,6 @@ fn add(args: AddArgs) -> Result<(), String> {
             allow_downgrade: false,
             root_public_identity: public_entry.as_ref().map(|entry| entry.public_identity()),
             trust_community: args.trust_community,
-            project_lock: &project_root,
         });
     }
     if !args.dry_run {
@@ -1256,7 +1316,6 @@ struct GraphRequest<'a> {
     allow_downgrade: bool,
     root_public_identity: Option<public_directory::PublicIdentity>,
     trust_community: Vec<String>,
-    project_lock: &'a Path,
 }
 
 fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
@@ -1273,7 +1332,6 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         allow_downgrade,
         root_public_identity,
         trust_community,
-        project_lock,
     } = request;
     if !dry_run {
         transaction::recover(project_root)?;
@@ -1285,31 +1343,13 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         project_config,
         global_config,
     )?;
-    let lock_before_graph = lockfile::load(project_lock)?;
     let root_loaded_identity = match &graph.snapshots[0].loaded.source {
         registry::RegistrySource::PublicRemote { entry, .. } => Some(entry.public_identity()),
         _ => root_public_identity,
     };
     for snapshot in &graph.snapshots {
         if let registry::RegistrySource::PublicRemote { entry, .. } = &snapshot.loaded.source {
-            authorize_community(entry, &trust_community, project_lock)?;
-            let identity = entry.public_identity();
-            if entry.tier == public_directory::Tier::Community
-                && !trust_community.iter().any(|id| id == &entry.id)
-                && !lock_before_graph.lock().providers.iter().any(|p| {
-                    p.public_identity.as_ref().is_some_and(|locked| {
-                        locked.registry_id == identity.registry_id
-                            && locked.tier == "community"
-                            && locked.publisher == identity.publisher
-                            && locked.repository == identity.repository
-                    })
-                })
-            {
-                return Err(format!(
-                    "Community dependency '{}' requires explicit trust via --trust-community {}",
-                    entry.id, entry.id
-                ));
-            }
+            authorize_community(entry, &trust_community)?;
         }
     }
     let before = lockfile::load(project_root)?;
@@ -2674,7 +2714,7 @@ fn update(args: UpdateArgs) -> Result<(), String> {
                 identity.registry_id
             ));
         }
-        authorize_community(&entry, &args.trust_community, project_root)?;
+        authorize_community(&entry, &args.trust_community)?;
         Some(entry)
     } else {
         None
@@ -2733,7 +2773,6 @@ fn update(args: UpdateArgs) -> Result<(), String> {
             allow_downgrade: args.allow_downgrade,
             root_public_identity: public_entry.as_ref().map(|entry| entry.public_identity()),
             trust_community: args.trust_community,
-            project_lock: project_root,
         });
     }
     let candidate_item = loaded.registry.find(&existing.item_id).ok_or_else(|| {
@@ -3112,6 +3151,7 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
         } else {
             before.items.clone()
         };
+    authorize_locked_community(&selected, &before.providers, &args.trust_community)?;
     let mut edits = Vec::new();
     let mut item_results = Vec::new();
     let mut restore_bytes = 0_u64;

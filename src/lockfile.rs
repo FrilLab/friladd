@@ -183,8 +183,8 @@ impl Lock {
             validate_locator(&provider.resolved_source)?;
             validate_digest(&provider.manifest_sha256)?;
             if let Some(identity) = &provider.public_identity {
+                validate_id(&identity.registry_id, "public registry")?;
                 if !matches!(identity.tier.as_str(), "official" | "community")
-                    || identity.registry_id.is_empty()
                     || identity.publisher.is_empty()
                     || identity.manifest_sha256 != provider.manifest_sha256
                 {
@@ -201,6 +201,12 @@ impl Lock {
                     &identity.reviewed_revision,
                 )?;
                 approved.validate_manifest_url(&identity.registry_url)?;
+                if (identity.tier == "official"
+                    && !crate::public_directory::is_official_identity(identity))
+                    || (identity.tier == "community" && identity.registry_id.starts_with("fril"))
+                {
+                    return Err("Lock public provider tier does not match its namespace".into());
+                }
                 if provider.resolved_source != identity.registry_url {
                     return Err(
                         "Lock public manifest source disagrees with its trust record".into(),

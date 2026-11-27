@@ -2,9 +2,15 @@
 
 ## Unreleased — 0.2.x public directory integration
 
-- Implement zero-configuration official discovery, exact qualified provider selection, identity-scoped community consent, lock provenance, and public transport for issues #39–#41. Public installs remain unavailable until an entry is independently reviewed and activated in the empty directory.
-- Create the separately maintained public `FrilLab/frilregistry` static directory with local-only validation, submission/review/suspension/rollback policy, and protected `main`. Its canonical endpoint is live and publicly reachable but remains empty pending independent review of the suspended FrilCraft candidate.
-- Add a separate strict public transport and bounded directory parser for #40: HTTPS allowlist, pinned checked DNS answers, disabled proxies/redirects, immutable repository path matching, and exact manifest digest verification.
+- Implement zero-configuration official discovery, exact qualified provider selection, per-operation community consent (including lock-based restore), lock provenance, and separate directory/provider transport for issues #39–#41. Public installs remain unavailable until canonical hosting and an active provider are verified.
+- Replace provider-specific official ID lists with a generic FrilLab namespace/repository identity rule so future official directory entries do not require CLI republication.
+- Maintain the separate `FrilLab/frilregistry` directory with local-only validation, review/suspension/rollback policy, and protected `main`. The intended canonical endpoint is `https://registry.frillab.com/registries.json`; DNS and Cloudflare deployment are not yet verified, and the FrilCraft candidate remains suspended.
+- Add strict bounded transport and directory parsing: separate fixed directory and provider hosts, DNS answer validation/pinning, disabled proxies/redirects, immutable repository path matching, and exact manifest digest verification.
+
+## 0.2.1 candidate (unpublished; NO-GO)
+
+- Prepare the compatible patch version containing curated public discovery and installation. Do not publish until the live official-provider and production qualification gates in issue #43 pass and a maintainer authorizes publication of this exact version.
+- Record current directory operations and outage, incident, admission, and maintenance procedures in [the public directory runbook](docs/operations/public-directory.md). The catalog is empty, so this candidate has no real provider installation qualification.
 
 ## 0.2.0
 

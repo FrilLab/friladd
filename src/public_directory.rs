@@ -7,12 +7,7 @@ use std::collections::HashSet;
 pub const MAX_DIRECTORY_BYTES: usize = 1024 * 1024;
 pub const MAX_DIRECTORY_ENTRIES: usize = 256;
 
-const RESERVED_OFFICIAL: &[(&str, &str)] = &[
-    ("frilcraft", "frilcraft"),
-    ("frilassets", "frilassets"),
-    ("frilremotion", "frilremotion"),
-    ("frilstudio", "frilstudio"),
-];
+const OFFICIAL_NAMESPACE_PREFIX: &str = "fril";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Tier {
@@ -265,17 +260,13 @@ fn parse_entry(entry: DirectoryEntryDocument) -> Result<DirectoryEntry, String> 
     }
     match tier {
         Tier::Official => {
-            let Some((reserved_id, reserved_repository)) =
-                RESERVED_OFFICIAL.iter().find(|(id, _)| *id == entry.id)
-            else {
+            if owner != "FrilLab"
+                || entry.publisher != "github:FrilLab"
+                || !entry.id.starts_with(OFFICIAL_NAMESPACE_PREFIX)
+                || repo_name.to_ascii_lowercase() != entry.id
+            {
                 return Err(format!(
-                    "Official registry ID is not reserved: {}",
-                    entry.id
-                ));
-            };
-            if owner != "FrilLab" || repo_name != *reserved_repository || entry.id != *reserved_id {
-                return Err(format!(
-                    "Official registry {} does not match its reserved publisher identity",
+                    "Official registry {} must use its matching FrilLab repository and namespace",
                     entry.id
                 ));
             }
@@ -287,9 +278,9 @@ fn parse_entry(entry: DirectoryEntryDocument) -> Result<DirectoryEntry, String> 
                     entry.id
                 ));
             }
-            if RESERVED_OFFICIAL.iter().any(|(id, _)| *id == entry.id) {
+            if entry.id.starts_with(OFFICIAL_NAMESPACE_PREFIX) {
                 return Err(format!(
-                    "Reserved official registry ID cannot be community-owned: {}",
+                    "The FrilLab registry namespace cannot be community-owned: {}",
                     entry.id
                 ));
             }
@@ -312,6 +303,29 @@ fn parse_entry(entry: DirectoryEntryDocument) -> Result<DirectoryEntry, String> 
             notes: entry.review.notes,
         },
     })
+}
+
+pub(crate) fn is_official_identity(identity: &PublicIdentity) -> bool {
+    if identity.tier != "official"
+        || identity.publisher != "github:FrilLab"
+        || !identity.registry_id.starts_with(OFFICIAL_NAMESPACE_PREFIX)
+    {
+        return false;
+    }
+    let Ok(repository) = url::Url::parse(&identity.repository) else {
+        return false;
+    };
+    let Some(mut segments) = repository.path_segments() else {
+        return false;
+    };
+    let owner = segments.next().unwrap_or_default();
+    let name = segments.next().unwrap_or_default();
+    owner == "FrilLab"
+        && name.to_ascii_lowercase() == identity.registry_id
+        && segments.next().is_none()
+        && ApprovedRepository::new(&identity.repository, &identity.reviewed_revision)
+            .and_then(|approved| approved.validate_manifest_url(&identity.registry_url))
+            .is_ok()
 }
 
 fn valid_id(value: &str) -> bool {
@@ -389,11 +403,20 @@ mod tests {
     use super::*;
 
     const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
-    const MANIFEST_URL: &str = "https://raw.githubusercontent.com/FrilLab/frilcraft/0123456789abcdef0123456789abcdef01234567/registry.json";
 
     fn document(id: &str, tier: &str, status: &str, revision: &str) -> Vec<u8> {
+        let (owner, repository) = if tier == "official" {
+            ("FrilLab", id)
+        } else {
+            ("example", id)
+        };
+        let manifest_url = format!(
+            "https://raw.githubusercontent.com/{owner}/{repository}/{REVISION}/registry.json"
+        );
+        let repository_url = format!("https://github.com/{owner}/{repository}");
+        let publisher = format!("github:{owner}");
         format!(
-            r#"{{"schemaVersion":1,"registries":[{{"id":"{id}","displayName":"FrilCraft","description":"Reviewed components","registryUrl":"{MANIFEST_URL}","repository":"https://github.com/FrilLab/frilcraft","publisher":"github:FrilLab","tier":"{tier}","status":"{status}","reviewedRevision":"{revision}","manifestSha256":"{}","review":{{"reviewedAt":"2026-11-27T00:00:00Z","reviewer":"maintainer","notes":"Reviewed immutable source"}}}}]}}"#,
+            r#"{{"schemaVersion":1,"registries":[{{"id":"{id}","displayName":"Provider","description":"Reviewed components","registryUrl":"{manifest_url}","repository":"{repository_url}","publisher":"{publisher}","tier":"{tier}","status":"{status}","reviewedRevision":"{revision}","manifestSha256":"{}","review":{{"reviewedAt":"2026-11-27T00:00:00Z","reviewer":"maintainer","notes":"Reviewed immutable source"}}}}]}}"#,
             "a".repeat(64)
         )
         .into_bytes()
@@ -406,10 +429,18 @@ mod tests {
         assert_eq!(directory.get("frilcraft").unwrap().id, "frilcraft");
         assert_eq!(directory.active_official().count(), 1);
         assert_eq!(directory.active_public().count(), 1);
-        assert!(
-            PublicDirectory::parse(&document("community", "community", "suspended", REVISION))
-                .is_err()
-        );
+        let community = PublicDirectory::parse(&document(
+            "community-tools",
+            "community",
+            "suspended",
+            REVISION,
+        ))
+        .unwrap();
+        assert_eq!(community.active_public().count(), 0);
+        let future_official =
+            PublicDirectory::parse(&document("frilphysics", "official", "active", REVISION))
+                .unwrap();
+        assert_eq!(future_official.active_official().count(), 1);
         assert!(
             PublicDirectory::parse(&document("frilcraft", "official", "suspended", REVISION))
                 .unwrap()
