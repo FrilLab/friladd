@@ -12,14 +12,67 @@ use std::{
 };
 
 pub const PUBLIC_REGISTRY_HOST: &str = "raw.githubusercontent.com";
+pub const PUBLIC_DIRECTORY_URL: &str =
+    "https://raw.githubusercontent.com/FrilLab/frilregistry/main/registries.json";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApprovedRepository {
-    owner: String,
-    name: String,
-    revision: String,
+    pub owner: String,
+    pub name: String,
+    pub revision: String,
+}
+
+impl ApprovedRepository {
+    pub fn validate_artifact_url(
+        &self,
+        manifest_url: &Url,
+        artifact_url: &Url,
+    ) -> Result<Url, String> {
+        let manifest = self.validate_manifest_url(manifest_url.as_str())?;
+        let artifact = self.validate_manifest_url(artifact_url.as_str())?;
+        let prefix = format!("{}/{}/{}/", self.owner, self.name, self.revision);
+        let root_path = format!("/{prefix}");
+        if !artifact.path().starts_with(&root_path) || !manifest.path().starts_with(&root_path) {
+            return Err("Public resource URL escapes the reviewed repository revision".into());
+        }
+        let manifest_parent = manifest
+            .path()
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .ok_or("Invalid reviewed manifest path")?;
+        if artifact.path() == manifest.path()
+            || !artifact.path().starts_with(&format!("{manifest_parent}/"))
+        {
+            return Err("Public artifact URL escapes its reviewed manifest directory".into());
+        }
+        Ok(artifact)
+    }
+}
+
+impl ApprovedRepository {
+    pub fn artifact_url(&self, registry_url: &Url, source: &str) -> Result<Url, String> {
+        let manifest_path = registry_url
+            .path_segments()
+            .ok_or("Invalid public manifest path")?
+            .collect::<Vec<_>>();
+        if manifest_path.len() < 4 {
+            return Err("Invalid public manifest directory".into());
+        }
+        let source = crate::registry::validate_relative_path(source, "source")?;
+        let mut directory = manifest_path[3..manifest_path.len() - 1].to_vec();
+        directory.extend(source.split('/'));
+        let base = format!(
+            "https://raw.githubusercontent.com/{}/{}/{}/{}",
+            self.owner,
+            self.name,
+            self.revision,
+            directory.join("/")
+        );
+        let artifact = Url::parse(&base).map_err(|_| "Invalid public artifact URL")?;
+        self.validate_artifact_url(registry_url, &artifact)
+    }
 }
 
 impl ApprovedRepository {
@@ -124,6 +177,37 @@ pub fn fetch(
         return Err("Public response limit must be greater than zero".into());
     }
     let checked = approved_repository.validate_manifest_url(url.as_str())?;
+    fetch_checked_url(checked, max_bytes)
+}
+
+pub fn fetch_artifact(
+    url: &Url,
+    manifest_url: &Url,
+    approved_repository: &ApprovedRepository,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    if max_bytes == 0 {
+        return Err("Public response limit must be greater than zero".into());
+    }
+    let checked = approved_repository.validate_artifact_url(manifest_url, url)?;
+    fetch_checked_url(checked, max_bytes)
+}
+
+/// Fetches only FrilLab's compiled canonical static directory endpoint.
+pub fn fetch_directory() -> Result<Vec<u8>, String> {
+    let checked = validate_public_url(PUBLIC_DIRECTORY_URL)?;
+    if checked.as_str() != PUBLIC_DIRECTORY_URL
+        || checked.path() != "/FrilLab/frilregistry/main/registries.json"
+    {
+        return Err("Compiled public directory endpoint is invalid".into());
+    }
+    fetch_checked_url(checked, crate::public_directory::MAX_DIRECTORY_BYTES)
+}
+
+fn fetch_checked_url(checked: Url, max_bytes: usize) -> Result<Vec<u8>, String> {
+    if max_bytes == 0 {
+        return Err("Public response limit must be greater than zero".into());
+    }
     let addresses = resolve_public_addresses(checked.host_str().ok_or("Missing public host")?)?;
     let builder = Client::builder()
         .https_only(true)
@@ -295,6 +379,16 @@ mod tests {
         ] {
             assert!(validate_public_url(value).is_err(), "accepted {value}");
         }
+        assert_eq!(
+            validate_public_url(PUBLIC_DIRECTORY_URL).unwrap().as_str(),
+            PUBLIC_DIRECTORY_URL
+        );
+        assert!(
+            validate_public_url(
+                "https://raw.githubusercontent.com/Other/frilregistry/main/registries.json"
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -313,6 +407,36 @@ mod tests {
                 "accepted {suffix}"
             );
         }
+    }
+
+    #[test]
+    fn artifact_url_stays_under_reviewed_manifest_directory() {
+        let approved =
+            ApprovedRepository::new("https://github.com/example/provider", &"a".repeat(40))
+                .unwrap();
+        let manifest = approved
+            .validate_manifest_url(&format!(
+                "https://raw.githubusercontent.com/example/provider/{}/registry/registry.json",
+                "a".repeat(40)
+            ))
+            .unwrap();
+        let artifact = approved
+            .artifact_url(&manifest, "assets/envelope.bin")
+            .unwrap();
+        assert!(artifact.path().ends_with("/assets/envelope.bin"));
+        assert!(approved.validate_artifact_url(&manifest, &artifact).is_ok());
+        assert!(approved.artifact_url(&manifest, "../escape").is_err());
+        let sibling = Url::parse(&format!(
+            "https://raw.githubusercontent.com/example/provider/{}/other.bin",
+            "a".repeat(40)
+        ))
+        .unwrap();
+        assert!(approved.validate_artifact_url(&manifest, &sibling).is_err());
+        assert!(
+            approved
+                .artifact_url(&manifest, "https://example.invalid/file")
+                .is_err()
+        );
     }
 
     #[test]

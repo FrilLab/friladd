@@ -11,8 +11,17 @@ pub(crate) const MAX_FILES_PER_ITEM: usize = 256;
 
 #[derive(Clone, Debug)]
 pub enum RegistrySource {
-    Local { root: PathBuf },
-    Remote { manifest_url: Url },
+    Local {
+        root: PathBuf,
+    },
+    Remote {
+        manifest_url: Url,
+    },
+    PublicRemote {
+        manifest_url: Url,
+        approved_repository: crate::public_transport::ApprovedRepository,
+        entry: Box<crate::public_directory::DirectoryEntry>,
+    },
 }
 
 #[derive(Debug)]
@@ -101,6 +110,35 @@ fn load_registry_inner(
         (bytes, RegistrySource::Local { root })
     };
 
+    parse_manifest_bytes(bytes, source, location)
+}
+
+pub fn load_public_registry(
+    manifest_url: &str,
+    bytes: Vec<u8>,
+    approved_repository: crate::public_transport::ApprovedRepository,
+    entry: crate::public_directory::DirectoryEntry,
+) -> Result<LoadedRegistry, String> {
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err("Registry manifest exceeds the byte limit".into());
+    }
+    let manifest_url = approved_repository.validate_manifest_url(manifest_url)?;
+    parse_manifest_bytes(
+        bytes,
+        RegistrySource::PublicRemote {
+            manifest_url,
+            approved_repository,
+            entry: Box::new(entry),
+        },
+        "[curated public registry]",
+    )
+}
+
+fn parse_manifest_bytes(
+    bytes: Vec<u8>,
+    source: RegistrySource,
+    declared_location: &str,
+) -> Result<LoadedRegistry, String> {
     let text = std::str::from_utf8(&bytes)
         .map_err(|_| "Registry manifest is not valid UTF-8".to_string())?;
     #[derive(Deserialize)]
@@ -116,10 +154,11 @@ fn load_registry_inner(
         )
     })?;
     let (registry, v2) = if header.schema_version == 2 {
-        if let RegistrySource::Remote { manifest_url } = &source
+        if let RegistrySource::Remote { manifest_url }
+        | RegistrySource::PublicRemote { manifest_url, .. } = &source
             && (manifest_url.query().is_some()
                 || manifest_url.fragment().is_some()
-                || Url::parse(location)
+                || Url::parse(declared_location)
                     .is_ok_and(|url| url.query().is_some() || url.fragment().is_some()))
         {
             return Err(

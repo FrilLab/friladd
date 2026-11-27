@@ -202,7 +202,7 @@ npx friladd add envelope-reveal
 
 The package provides native executables for macOS ARM64, macOS x64, Linux x64, and Windows x64. The platform-specific npm package checks run in CI.
 
-The repository `registry/` directory contains development and test fixtures only. It is **not shipped in the npm package**, and the current CLI does not yet include public discovery. FrilLab operates the separate static directory at [FrilLab/frilregistry](https://github.com/FrilLab/frilregistry), but it currently has no active provider entries and this CLI does not contact it. Register an independent HTTPS Registry or supply your own local manifest with `--registry`. The repository fixtures remain available when developing or running tests from a source checkout.
+The repository `registry/` directory contains development and test fixtures only. It is **not shipped in the npm package**. FrilLab operates the separate static directory at [FrilLab/frilregistry](https://github.com/FrilLab/frilregistry); its current catalog has no active provider entries. Once entries are admitted, `fril search envelope` and `fril add frilcraft/envelope-reveal` use the curated directory without manual registration. Community installs require `--trust-community <registry-id>`. You can still register an independent HTTPS Registry or supply a local manifest with `--registry`.
 
 ## Third-party registries
 

@@ -106,6 +106,13 @@ pub fn resolve_list_selection(
     })
 }
 
+pub fn resolve_optional_default(
+    project: &Path,
+    global: &Path,
+) -> Result<Option<RegistrySelection>, String> {
+    resolve_registry_selection(None, None, project, global)
+}
+
 fn resolve_registry(
     explicit: Option<&str>,
     alias: Option<&str>,
@@ -118,7 +125,7 @@ fn resolve_registry(
     )
 }
 
-fn resolve_registry_selection(
+pub fn resolve_registry_selection(
     explicit: Option<&str>,
     alias: Option<&str>,
     project: &Path,
