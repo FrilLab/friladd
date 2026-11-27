@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://friladd.dev/schemas/public-directory-v1.schema.json",
+  "$id": "urn:friladd:schemas:public-directory-v1",
   "title": "FrilAdd public registry directory v1",
   "type": "object",
   "additionalProperties": false,

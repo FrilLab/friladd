@@ -26,7 +26,7 @@ The commands in this section are implemented in the source tree. Published npm r
 
 ## Proposed public directory contract (not yet implemented)
 
-The following commands and behavior are specified for the 0.2.x work in issues #39–#43. They are not currently shipped. The static directory schema and trust boundary are defined in [public-registry.md](public-registry.md) and [schema v1](schemas/public-directory-v1.schema.json). No canonical public endpoint is currently configured or claimed to be live.
+The following commands and behavior are specified for the 0.2.x work in issues #39–#43. They are not currently shipped. The static directory schema and trust boundary are defined in [public-registry.md](public-registry.md) and [schema v1](schemas/public-directory-v1.schema.json). The canonical static endpoint is live but currently has an empty catalog; the CLI does not contact it in this revision.
 
 | Proposed command | Contract |
 | --- | --- |
@@ -34,7 +34,7 @@ The following commands and behavior are specified for the 0.2.x work in issues #
 | `fril list --public [--json]`, `fril search QUERY --public [--json]` | Search active approved official and community entries from directory metadata. `--public` conflicts with explicit registry selectors and `--all-registries`. Existing configured-only semantics remain unchanged. No partial success on directory failure. |
 | `fril info REGISTRY/ITEM`, `fril add REGISTRY/ITEM` | Prefer an explicit local alias if configured; otherwise resolve an active public entry. Never silently bypass a configured identity collision. No implicit provider choice for unqualified install. Official active entries need no prompt. Community installation requires affirmative identity-scoped approval bound to provider ID, publisher, origin, reviewed revision and digest. Generic `--yes` is not approval; dry run never persists it. Apply the same trust rule to dependencies. |
 
-With no configured default, ordinary list/search may use official entries only after a real canonical endpoint is deployed. Public selection requires the strict public transport and trust checks; explicitly selected custom/private registries retain their existing independent behavior. Offline lifecycle commands and locked exact restore never consult the directory.
+With no configured default, ordinary list/search may use official entries only after an active official entry is approved and CLI integration ships. Public selection requires the strict public transport and trust checks; explicitly selected custom/private registries retain their existing independent behavior. Offline lifecycle commands and locked exact restore never consult the directory.
 
 Exit status **0** means success, including help and version. Invalid usage and operational failures use **2**. Operational errors are written to stderr with an `Error:` prefix. A human-mode command may have printed progress or its plan before an error. CLI parsing errors include usage and go to stderr. Scripts should branch on exit status and use machine mode where available.
 
