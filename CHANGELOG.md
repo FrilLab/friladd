@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add deterministic `list`, `search`, and `info` commands with provider-neutral Registry v1/v2 metadata and versioned JSON output.
+- Add explicit configured-registry search/list selection with project-over-global alias shadowing and fail-all behavior for unavailable registries.
 - Install v1 and dependency-free v2 items as managed resources, recording ownership with the file changes through the recoverable transaction engine.
 - Make identical managed adds no-ops and refuse to overwrite modified, missing, or unmanaged files; dry runs verify the transaction plan without writes.
 - Emit versioned JSON plans and results for managed adds.

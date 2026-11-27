@@ -8,6 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const MAX_CATALOG_REGISTRIES: usize = 64;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "friladd",
@@ -24,6 +26,12 @@ enum Command {
     /// List items in a registry.
     #[command(after_help = "Example: friladd list --registry ./registry.json")]
     List(ListArgs),
+    /// Search items in the selected registry.
+    #[command(after_help = "Example: friladd search model --all-registries --json")]
+    Search(SearchArgs),
+    /// Show metadata for one item.
+    #[command(after_help = "Example: friladd info team-ui/button --json")]
+    Info(InfoArgs),
     /// Install one item from a registry.
     #[command(after_help = "Example: friladd add local/sample --project ./app --dry-run")]
     Add(AddArgs),
@@ -132,7 +140,7 @@ struct RestoreArgs {
 #[derive(Debug, Args)]
 struct ListArgs {
     /// Registry alias (or use --registry for a path or URL).
-    #[arg(conflicts_with = "registry")]
+    #[arg(conflicts_with_all = ["registry", "all_registries"])]
     registry_alias: Option<String>,
     /// Registered alias, local manifest path, or HTTPS manifest URL.
     #[arg(long, value_name = "ALIAS_OR_SOURCE")]
@@ -140,6 +148,49 @@ struct ListArgs {
     /// Project root (defaults to the current directory).
     #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
+    /// Search every configured effective registry.
+    #[arg(long, conflicts_with_all = ["registry", "registry_alias"])]
+    all_registries: bool,
+    /// Emit versioned JSON output.
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct SearchArgs {
+    /// Case-insensitive text matched against item ID, name, description, tags, and kind.
+    query: String,
+    #[arg(
+        long,
+        value_name = "ALIAS_OR_SOURCE",
+        conflicts_with = "all_registries"
+    )]
+    registry: Option<String>,
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    all_registries: bool,
+    #[arg(long)]
+    json: bool,
+}
+#[derive(Debug, Args)]
+struct RegistryVerifyArgs {
+    #[arg(conflicts_with = "registry")]
+    registry_alias: Option<String>,
+    #[arg(long, value_name = "ALIAS_OR_SOURCE")]
+    registry: Option<String>,
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+}
+#[derive(Debug, Args)]
+struct InfoArgs {
+    /// Item name or registry/item.
+    item: String,
+    #[arg(long, value_name = "ALIAS_OR_SOURCE")]
+    registry: Option<String>,
+    #[arg(long, value_name = "DIRECTORY")]
+    project: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
 }
 #[derive(Debug, Args)]
 struct AddArgs {
@@ -163,7 +214,7 @@ struct AddArgs {
 enum RegistryCommand {
     /// Verify all declared source files and hashes without installing anything.
     #[command(after_help = "Example: friladd registry verify --registry ./registry.json")]
-    Verify(ListArgs),
+    Verify(RegistryVerifyArgs),
     /// Register and validate a manifest in the selected scope.
     #[command(after_help = "Example: friladd registry add local ./registry.json --default")]
     Add {
@@ -216,6 +267,8 @@ pub fn run() -> Result<(), String> {
     let cli = Cli::parse();
     match cli.command {
         Command::List(a) => list(a),
+        Command::Search(a) => search(a),
+        Command::Info(a) => info(a),
         Command::Add(a) => add(a),
         Command::Installed(a) => installed(a),
         Command::Status(a) => status(a),
@@ -282,13 +335,41 @@ fn project_config_path(project: Option<PathBuf>) -> Result<PathBuf, String> {
 }
 fn list(args: ListArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
-    let location = resolver::resolve_list(
+    if args.all_registries {
+        let registries = load_effective_registries(&project, &global)?;
+        let mut items = Vec::new();
+        for (alias, location) in registries {
+            let loaded = registry::load_registry(&location)
+                .map_err(|error| format!("Registry '{alias}' failed: {error}"))?;
+            items.extend(list_item_json(&loaded, Some(&alias)));
+        }
+        items.sort_by(|a, b| {
+            (a["provider"].as_str(), a["id"].as_str())
+                .cmp(&(b["provider"].as_str(), b["id"].as_str()))
+        });
+        if args.json {
+            print_catalog_json("list", serde_json::json!({"items": items}));
+        } else {
+            print_catalog_human(&items);
+        }
+        return Ok(());
+    }
+    let selection = resolver::resolve_list_selection(
         args.registry.as_deref(),
         args.registry_alias.as_deref(),
         &project,
         &global,
     )?;
-    let loaded = registry::load_registry(&location)?;
+    let loaded = registry::load_registry(&selection.manifest)?;
+    let mut items = list_item_json(&loaded, selection.alias.as_deref());
+    items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
+    if args.json {
+        print_catalog_json(
+            "list",
+            serde_json::json!({"registry": loaded.registry.name, "items": items}),
+        );
+        return Ok(());
+    }
     println!("Available items ({}):", loaded.registry.name);
     let mut items: Vec<_> = loaded.registry.items.iter().collect();
     items.sort_unstable_by_key(|item| &item.name);
@@ -296,10 +377,249 @@ fn list(args: ListArgs) -> Result<(), String> {
         if loaded.v2.is_some() && item.description.is_empty() {
             println!("- {}", item.name);
         } else {
-            println!("- {}: {}", item.name, item.description);
+            println!("- {}: {}", item.name, terminal_safe(&item.description));
         }
     }
     Ok(())
+}
+fn search(args: SearchArgs) -> Result<(), String> {
+    if args.query.trim().is_empty() {
+        return Err("Search query cannot be empty".into());
+    }
+    let (project, global) = roots(args.project)?;
+    let registries = if args.all_registries {
+        load_effective_registries(&project, &global)?
+            .into_iter()
+            .map(|(alias, location)| (Some(alias), location))
+            .collect::<Vec<_>>()
+    } else {
+        {
+            let selection = resolver::resolve_list_selection(
+                args.registry.as_deref(),
+                None,
+                &project,
+                &global,
+            )?;
+            vec![(selection.alias, selection.manifest)]
+        }
+    };
+    let query = args.query.to_lowercase();
+    let mut items = Vec::new();
+    for (alias, location) in registries {
+        let loaded = registry::load_registry(&location).map_err(|error| {
+            format!(
+                "Registry '{}' failed: {error}",
+                alias.as_deref().unwrap_or("selected registry")
+            )
+        })?;
+        items.extend(
+            list_item_json(&loaded, alias.as_deref())
+                .into_iter()
+                .filter(|item| {
+                    let text = [
+                        item["id"].as_str().unwrap_or_default(),
+                        item["name"].as_str().unwrap_or_default(),
+                        item["description"].as_str().unwrap_or_default(),
+                        item["kind"].as_str().unwrap_or_default(),
+                    ]
+                    .into_iter()
+                    .chain(
+                        item["tags"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|tag| tag.as_str()),
+                    )
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .to_lowercase();
+                    text.contains(&query)
+                }),
+        );
+    }
+    items.sort_by(|a, b| {
+        (a["provider"].as_str(), a["id"].as_str()).cmp(&(b["provider"].as_str(), b["id"].as_str()))
+    });
+    if args.json {
+        print_catalog_json(
+            "search",
+            serde_json::json!({"query": args.query, "items": items}),
+        );
+    } else {
+        print_catalog_human(&items);
+    }
+    Ok(())
+}
+fn info(args: InfoArgs) -> Result<(), String> {
+    let (project, global) = roots(args.project)?;
+    let resolution =
+        resolver::resolve_add(&args.item, args.registry.as_deref(), &project, &global)?;
+    let loaded = registry::load_registry(&resolution.manifest)?;
+    let item = loaded
+        .registry
+        .find(resolution.item)
+        .ok_or_else(|| format!("Item not found: {}", resolution.item.escape_debug()))?;
+    let provider = loaded
+        .v2
+        .as_ref()
+        .map(|v2| v2.id.as_str())
+        .unwrap_or(&loaded.registry.name);
+    let mut result = serde_json::json!({"provider": provider, "id": item.name, "name": item.name, "description": item.description, "files": item.files.iter().map(|file| serde_json::json!({"source": file.source, "target": file.target, "sha256": file.sha256})).collect::<Vec<_>>()});
+    result["manifestSha256"] = serde_json::json!(loaded.manifest_sha256);
+    if let Some(v2) = &loaded.v2 {
+        let meta = v2.select(resolution.item, None)?;
+        result["version"] = serde_json::json!(meta.version);
+        result["kind"] = serde_json::json!(meta.kind);
+        result["tags"] = serde_json::json!(meta.tags);
+        result["license"] = serde_json::json!(
+            meta.license
+                .as_ref()
+                .map(|license| serde_json::json!({"id": license.id, "notice": license.notice}))
+        );
+        result["files"] = serde_json::json!(meta.files.iter().map(|file| serde_json::json!({"source": file.source, "target": file.target, "sha256": file.sha256, "size": file.size})).collect::<Vec<_>>());
+        result["dependencies"] = serde_json::json!(meta.dependencies.iter().map(|dep| serde_json::json!({"providerId": dep.provider_id, "itemId": dep.item_id, "version": dep.version, "manifestSha256": dep.manifest_sha256})).collect::<Vec<_>>());
+        result["packages"] = serde_json::json!(
+            meta.packages
+                .iter()
+                .map(
+                    |pkg| serde_json::json!({"name": pkg.name, "spec": pkg.spec, "kind": pkg.kind})
+                )
+                .collect::<Vec<_>>()
+        );
+    }
+    if args.json {
+        print_catalog_json("info", serde_json::json!({"item": result}));
+    } else {
+        println!("{} — {}", item.name, terminal_safe(&item.description));
+        println!("Provider: {provider}");
+        println!("Manifest SHA-256: {}", loaded.manifest_sha256);
+        if let Some(meta) = &loaded.v2 {
+            let item_meta = meta.select(resolution.item, None)?;
+            println!("Version: {}", item_meta.version);
+            println!("Kind: {:?}", item_meta.kind);
+            if !item_meta.tags.is_empty() {
+                println!("Tags: {}", item_meta.tags.join(", "));
+            }
+            if let Some(license) = &item_meta.license {
+                println!("License: {}", license.id);
+                if let Some(notice) = &license.notice {
+                    println!("License notice: {notice}");
+                }
+            }
+        }
+        for file in &item.files {
+            println!(
+                "File: {} -> {} (sha256 {})",
+                file.source, file.target, file.sha256
+            );
+        }
+        if let Some(meta) = &loaded.v2 {
+            let item_meta = meta.select(resolution.item, None)?;
+            for file in &item_meta.files {
+                println!("Size: {} {} bytes", file.target, file.size);
+            }
+            for dependency in &item_meta.dependencies {
+                println!(
+                    "Dependency: {}/{}@{}",
+                    dependency.provider_id, dependency.item_id, dependency.version
+                );
+            }
+            for package in &item_meta.packages {
+                println!(
+                    "Package requirement: {} {} ({:?})",
+                    package.name, package.spec, package.kind
+                );
+            }
+        }
+    }
+    Ok(())
+}
+fn list_item_json(
+    loaded: &registry::LoadedRegistry,
+    alias: Option<&str>,
+) -> Vec<serde_json::Value> {
+    loaded.registry.items.iter().map(|item| {
+        let mut value = serde_json::json!({"provider": loaded.v2.as_ref().map(|v2| v2.id.as_str()).unwrap_or(loaded.registry.name.as_str()), "registry": loaded.registry.name, "id": item.name, "name": item.name, "description": item.description});
+        if let Some(alias) = alias { value["alias"] = serde_json::json!(alias); }
+        if let Some(meta) = loaded.v2.as_ref().and_then(|v2| v2.items.iter().find(|entry| entry.id == item.name)) {
+            value["version"] = serde_json::json!(meta.version); value["kind"] = serde_json::json!(meta.kind); value["tags"] = serde_json::json!(meta.tags);
+        }
+        value
+    }).collect()
+}
+fn print_catalog_json(command: &str, data: serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::json!({"schemaVersion": 1, "command": command, "data": data})
+    );
+}
+fn print_catalog_human(items: &[serde_json::Value]) {
+    for item in items {
+        println!(
+            "{}/{}: {}",
+            item["provider"].as_str().unwrap_or("registry"),
+            item["id"].as_str().unwrap_or(""),
+            terminal_safe(item["description"].as_str().unwrap_or(""))
+        );
+    }
+}
+fn terminal_safe(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|character| {
+            if character.is_control() {
+                character.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![character]
+            }
+        })
+        .collect()
+}
+fn load_effective_registries(
+    project: &Path,
+    global: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let project_config = config::load(project)?;
+    let global_config = config::load(global)?;
+    let mut sources = std::collections::BTreeMap::new();
+    for (alias, entry) in global_config.registries {
+        sources.insert(
+            alias,
+            (
+                entry.source,
+                global.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            ),
+        );
+    }
+    for (alias, entry) in project_config.registries {
+        sources.insert(
+            alias,
+            (
+                entry.source,
+                project.parent().unwrap_or(Path::new(".")).to_path_buf(),
+            ),
+        );
+    }
+    let mut out = Vec::new();
+    if sources.len() > MAX_CATALOG_REGISTRIES {
+        return Err(format!(
+            "Catalog operation is limited to {MAX_CATALOG_REGISTRIES} effective registries"
+        ));
+    }
+    for (alias, (source, base)) in sources {
+        let path = if source.contains("://") || Path::new(&source).is_absolute() {
+            PathBuf::from(&source)
+        } else {
+            base.join(source)
+        };
+        out.push((
+            alias,
+            path.into_os_string()
+                .into_string()
+                .map_err(|_| "Registry path is not UTF-8")?,
+        ));
+    }
+    Ok(out)
 }
 fn add(args: AddArgs) -> Result<(), String> {
     let (project_config, global) = roots(args.project.clone())?;
@@ -1538,7 +1858,7 @@ fn print_mutation_result(command: &str, dry_run: bool, items: Vec<serde_json::Va
     }
 }
 
-fn verify_registry(args: ListArgs) -> Result<(), String> {
+fn verify_registry(args: RegistryVerifyArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
     let location = resolver::resolve_list(
         args.registry.as_deref(),

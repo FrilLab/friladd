@@ -48,6 +48,8 @@ friladd registry default <alias> [--global | --project <directory>]
 friladd registry remove <alias> [--global | --project <directory>]
 friladd registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
 friladd list [<registry-alias> | --registry <alias-or-source>] [--project <directory>]
+friladd search <query> [--registry <alias-or-source> | --all-registries] [--project <directory>] [--json]
+friladd info <item-or-registry/item> [--registry <alias-or-source>] [--project <directory>] [--json]
 friladd add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run] [--json]
 friladd installed [--project <directory>] [--json]
 friladd status [<item-or-registry/item>] [--project <directory>] [--json] [--check]
@@ -63,7 +65,9 @@ Registry authors can use [Registry v2](docs/registry-v2.md) for versioned metada
 Examples using this repository's fixture:
 
 ```sh
-friladd list --registry ./registry/registry.json
+friladd list --registry ./registry/registry.json --json
+friladd search model --all-registries --json
+friladd info triangle --registry ./registry/examples/v2/assets/registry.json --json
 friladd add envelope-reveal --registry ./registry/registry.json --dry-run
 friladd add envelope-reveal --registry ./registry/registry.json --project ./my-app
 friladd installed --project ./my-app
@@ -97,7 +101,9 @@ The configuration schema is separate from the Registry Manifest v1 format:
 }
 ```
 
-Resolution order for an unqualified item is explicit `--registry`, then project default, then global default. A `registry/item` identifier selects that alias directly; project entries shadow global entries with the same alias. There is no search across providers. An explicit `--registry` can be a registered alias, local manifest path, or HTTPS manifest URL. Qualified identifiers cannot be combined with `--registry`. A broken configured project default is reported instead of falling through to global configuration.
+Resolution order for an unqualified item is explicit `--registry`, then project default, then global default. A `registry/item` identifier selects that alias directly; project entries shadow global entries with the same alias. `search --all-registries` and `list --all-registries` inspect the configured effective aliases only; they do not discover providers. An explicit `--registry` can be a registered alias, local manifest path, or HTTPS manifest URL. Qualified identifiers cannot be combined with `--registry`. A broken configured project default is reported instead of falling through to global configuration.
+
+`search` matches case-insensitively across item ID, name, description, tags, and kind. Empty or whitespace-only queries are errors; no matches is a successful empty result. Multi-registry operations inspect up to 64 effective aliases and fail as a whole if any selected registry is unavailable or invalid, so failures are never hidden. `list`, `search`, and `info` accept `--json`; their versioned output is documented in the CLI contract and output schema. Metadata commands read manifests only and never fetch asset files.
 
 For example, FrilCraft is one independent third-party provider and can register like any other provider:
 
