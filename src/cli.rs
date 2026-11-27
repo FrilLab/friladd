@@ -2,7 +2,7 @@ use crate::{
     config::{self, Config, RegistryEntry, Scope},
     dependency, downloader, lockfile, planner, registry, resolver, transaction,
 };
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -11,10 +11,10 @@ use std::{
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "friladd",
+    name = "fril",
     version,
     about = "Install selected source files from registries",
-    after_help = "Example: friladd add sample --registry ./registry.json --dry-run"
+    after_help = "Example: fril add sample --registry ./registry.json --dry-run"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -23,39 +23,39 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// List items in a registry.
-    #[command(after_help = "Example: friladd list --registry ./registry.json")]
+    #[command(after_help = "Example: fril list --registry ./registry.json")]
     List(ListArgs),
     /// Search items in the selected registry.
-    #[command(after_help = "Example: friladd search model --all-registries --json")]
+    #[command(after_help = "Example: fril search model --all-registries --json")]
     Search(SearchArgs),
     /// Show metadata for one item.
-    #[command(after_help = "Example: friladd info team-ui/button --json")]
+    #[command(after_help = "Example: fril info team-ui/button --json")]
     Info(InfoArgs),
     /// Diagnose project distribution state.
-    #[command(after_help = "Example: friladd doctor --project ./app --json")]
+    #[command(after_help = "Example: fril doctor --project ./app --json")]
     Doctor(DoctorArgs),
     /// Install one item from a registry.
-    #[command(after_help = "Example: friladd add local/sample --project ./app --dry-run")]
+    #[command(after_help = "Example: fril add local/sample --project ./app --dry-run")]
     Add(AddArgs),
     /// List managed resources from the project lock.
-    #[command(after_help = "Example: friladd installed --project ./app --json")]
+    #[command(after_help = "Example: fril installed --project ./app --json")]
     Installed(InstalledArgs),
     /// Check managed file integrity without network access.
-    #[command(after_help = "Example: friladd status registry/item --project ./app --check --json")]
+    #[command(after_help = "Example: fril status registry/item --project ./app --check --json")]
     Status(StatusArgs),
     /// Update one managed item from an explicitly selected candidate registry.
     #[command(
-        after_help = "Example: friladd update registry/item --registry ./candidate.json --project ./app --dry-run"
+        after_help = "Example: fril update registry/item --registry ./candidate.json --project ./app --dry-run"
     )]
     Update(UpdateArgs),
     /// Remove one managed item without deleting locally modified files.
-    #[command(after_help = "Example: friladd remove registry/item --project ./app --dry-run")]
+    #[command(after_help = "Example: fril remove registry/item --project ./app --dry-run")]
     Remove(ManagedMutationArgs),
     /// Restore missing managed files from their exact locked sources.
-    #[command(after_help = "Example: friladd restore --project ./app --dry-run")]
+    #[command(after_help = "Example: fril restore --project ./app --dry-run")]
     Restore(RestoreArgs),
     /// Manage named registry sources.
-    #[command(after_help = "Example: friladd registry list --global")]
+    #[command(after_help = "Example: fril registry list --global")]
     Registry {
         #[command(subcommand)]
         command: RegistryCommand,
@@ -230,10 +230,10 @@ struct AddArgs {
 #[derive(Debug, Subcommand)]
 enum RegistryCommand {
     /// Verify all declared source files and hashes without installing anything.
-    #[command(after_help = "Example: friladd registry verify --registry ./registry.json")]
+    #[command(after_help = "Example: fril registry verify --registry ./registry.json")]
     Verify(RegistryVerifyArgs),
     /// Register and validate a manifest in the selected scope.
-    #[command(after_help = "Example: friladd registry add local ./registry.json --default")]
+    #[command(after_help = "Example: fril registry add local ./registry.json --default")]
     Add {
         alias: String,
         /// Local manifest path or HTTPS manifest URL.
@@ -249,7 +249,7 @@ enum RegistryCommand {
         project: Option<PathBuf>,
     },
     /// List configured registry aliases without fetching manifests.
-    #[command(after_help = "Example: friladd registry list --project ./app")]
+    #[command(after_help = "Example: fril registry list --project ./app")]
     List {
         /// Use only global configuration.
         #[arg(long, conflicts_with = "project")]
@@ -261,7 +261,7 @@ enum RegistryCommand {
         json: bool,
     },
     /// Unregister an alias from the selected scope.
-    #[command(after_help = "Example: friladd registry remove local")]
+    #[command(after_help = "Example: fril registry remove local")]
     Remove {
         alias: String,
         /// Use only global configuration.
@@ -272,7 +272,7 @@ enum RegistryCommand {
         project: Option<PathBuf>,
     },
     /// Set the default registry in the selected scope.
-    #[command(after_help = "Example: friladd registry default local")]
+    #[command(after_help = "Example: fril registry default local")]
     Default {
         alias: String,
         /// Use only global configuration.
@@ -283,8 +283,14 @@ enum RegistryCommand {
         project: Option<PathBuf>,
     },
 }
-pub fn run() -> Result<(), String> {
-    let cli = Cli::parse();
+pub fn run_as(name: &str) -> Result<(), String> {
+    let name = match name {
+        "fril" => "fril",
+        "friladd" => "friladd",
+        _ => return Err("Command identity must be `fril` or `friladd`".into()),
+    };
+    let matches = Cli::command().name(name).bin_name(name).get_matches();
+    let cli = Cli::from_arg_matches(&matches).map_err(|error| error.to_string())?;
     match cli.command {
         Command::List(a) => list(a),
         Command::Search(a) => search(a),
@@ -780,7 +786,7 @@ fn add(args: AddArgs) -> Result<(), String> {
             }
         }
         return Err(format!(
-            "Managed item {} has drift or a different snapshot; run `friladd status` and use `restore` or `update`.",
+            "Managed item {} has drift or a different snapshot; run `fril status` and use `restore` or `update`.",
             item.name
         ));
     }
@@ -3097,14 +3103,39 @@ mod tests {
     use super::*;
     #[test]
     fn clap_help_and_version_are_available() {
-        let help = Cli::try_parse_from(["friladd", "--help"])
+        let help = Cli::command()
+            .name("fril")
+            .try_get_matches_from(["fril", "--help"])
             .unwrap_err()
             .to_string();
+        assert!(help.contains("Usage: fril <COMMAND>"));
+        assert!(help.contains("Example: fril add sample"));
         assert!(help.contains("Install selected source files"));
-        let version = Cli::try_parse_from(["friladd", "--version"])
+        let legacy_help = Cli::command()
+            .name("friladd")
+            .try_get_matches_from(["friladd", "--help"])
             .unwrap_err()
             .to_string();
-        assert!(version.contains(env!("CARGO_PKG_VERSION")));
+        assert!(legacy_help.contains("Usage: friladd <COMMAND>"));
+        assert!(legacy_help.contains("Example: fril add sample"));
+        let version = Cli::command()
+            .name("fril")
+            .try_get_matches_from(["fril", "--version"])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            version.trim(),
+            format!("fril {}", env!("CARGO_PKG_VERSION"))
+        );
+        let legacy_version = Cli::command()
+            .name("friladd")
+            .try_get_matches_from(["friladd", "--version"])
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            legacy_version.trim(),
+            format!("friladd {}", env!("CARGO_PKG_VERSION"))
+        );
     }
 
     #[test]

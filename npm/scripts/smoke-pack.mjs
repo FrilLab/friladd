@@ -59,22 +59,108 @@ try {
     false,
     'The published npm package must not contain the repository test registry',
   );
+  const packedPackage = JSON.parse(
+    fs.readFileSync(path.join(installedPackage, 'package.json'), 'utf8'),
+  );
+  assert.deepEqual(packedPackage.bin, {
+    fril: 'bin/fril.js',
+    friladd: 'bin/friladd.js',
+  });
+  const nativeExecutables = fs.readdirSync(path.join(installedPackage, 'native')).sort();
+  const supportedExecutables = [
+    'friladd-aarch64-apple-darwin',
+    'friladd-x86_64-apple-darwin',
+    'friladd-x86_64-pc-windows-msvc.exe',
+    'friladd-x86_64-unknown-linux-gnu',
+  ];
+  assert.ok(nativeExecutables.length >= 1 && nativeExecutables.length <= supportedExecutables.length);
+  assert.ok(nativeExecutables.every((name) => supportedExecutables.includes(name)));
+  assert.ok(nativeExecutables.every((name) => !name.startsWith('fril-')));
+  if (nativeExecutables.length === supportedExecutables.length) {
+    assert.deepEqual(nativeExecutables, supportedExecutables);
+  }
   const configDir = path.join(tempRoot, 'global-config');
-  const invoke = (args, cwd = consumer) =>
-    run('npm', ['exec', '--yes', '--', 'friladd', ...args], cwd, {
+  const invoke = (args, cwd = consumer, command = 'friladd') =>
+    run('npm', ['exec', '--yes', '--', command, ...args], cwd, {
       FRILADD_CONFIG_DIR: configDir,
     });
 
-  const version = invoke(['--version']);
+  const packageVersion = packedPackage.version;
+  const version = invoke(['--version'], consumer, 'fril');
+  const legacyVersion = invoke(['--version'], consumer, 'friladd');
   assert.equal(version.status, 0, version.stderr);
-  const packageVersion = JSON.parse(
-    fs.readFileSync(path.join(installedPackage, 'package.json'), 'utf8'),
-  ).version;
-  assert.equal(version.stdout.trim(), `friladd ${packageVersion}`);
+  assert.equal(legacyVersion.status, 0, legacyVersion.stderr);
+  assert.equal(version.stdout.trim(), `fril ${packageVersion}`);
+  assert.equal(legacyVersion.stdout.trim(), `friladd ${packageVersion}`);
 
-  const help = invoke(['--help']);
+  const help = invoke(['--help'], consumer, 'fril');
+  const legacyHelp = invoke(['--help'], consumer, 'friladd');
   assert.equal(help.status, 0, help.stderr);
+  assert.equal(legacyHelp.status, 0, legacyHelp.stderr);
+  assert.match(help.stdout, /Usage: fril <COMMAND>/);
+  assert.match(legacyHelp.stdout, /Usage: friladd <COMMAND>/);
   assert.match(help.stdout, /Install selected source files/);
+  for (const name of ['fril', 'friladd']) {
+    const unknown = invoke(['not-a-command'], consumer, name);
+    assert.equal(unknown.status, 2, `${name}: ${unknown.stderr}`);
+    assert.equal(unknown.stdout, '');
+    assert.match(unknown.stderr, /unrecognized subcommand/i);
+  }
+
+  const commands = [
+    ['registry', 'add'], ['registry', 'list'], ['registry', 'default'],
+    ['registry', 'remove'], ['registry', 'verify'], ['list'], ['search'],
+    ['info'], ['add'], ['installed'], ['status'], ['update'], ['remove'],
+    ['restore'], ['doctor'],
+  ];
+  for (const commandArgs of commands) {
+    for (const name of ['fril', 'friladd']) {
+      const result = invoke([...commandArgs, '--help'], consumer, name);
+      assert.equal(result.status, 0, `${name} ${commandArgs.join(' ')}: ${result.stderr}`);
+      assert.match(result.stdout, new RegExp(`Usage: ${name}\\b`));
+    }
+  }
+
+  const npxHelp = run('npx', ['friladd', '--help'], consumer, {
+    FRILADD_CONFIG_DIR: configDir,
+  });
+  assert.equal(npxHelp.status, 0, `${npxHelp.stdout}\n${npxHelp.stderr}`);
+  assert.match(npxHelp.stdout, /Usage: friladd <COMMAND>/);
+  const npmExecHelp = run(
+    'npm', ['exec', '--yes', '--package=friladd', '--', 'fril', '--help'],
+    consumer,
+    { FRILADD_CONFIG_DIR: configDir },
+  );
+  assert.equal(npmExecHelp.status, 0, `${npmExecHelp.stdout}\n${npmExecHelp.stderr}`);
+  assert.match(npmExecHelp.stdout, /Usage: fril <COMMAND>/);
+  const pnpmTarball = path.join(os.tmpdir(), `f-${process.pid}.tgz`);
+  fs.copyFileSync(path.resolve(tarball), pnpmTarball);
+  try {
+    const pnpmDlxHelp = run(
+      'pnpm', ['dlx', `--package=${pnpmTarball}`, 'fril', '--help'],
+      consumer,
+      { FRILADD_CONFIG_DIR: configDir },
+    );
+    assert.equal(pnpmDlxHelp.status, 0, `${pnpmDlxHelp.stdout}\n${pnpmDlxHelp.stderr}`);
+    assert.match(pnpmDlxHelp.stdout, /Usage: fril <COMMAND>/);
+  } finally {
+    fs.rmSync(pnpmTarball, { force: true });
+  }
+
+  const globalPrefix = path.join(tempRoot, 'global-install');
+  const globalInstall = run(
+    'npm', ['install', '--global', '--prefix', globalPrefix, '--no-audit', '--no-fund', '--ignore-scripts', path.resolve(tarball)],
+    consumer,
+  );
+  assert.equal(globalInstall.status, 0, `${globalInstall.stdout}\n${globalInstall.stderr}`);
+  const globalBin = path.join(globalPrefix, process.platform === 'win32' ? '' : 'bin');
+  const globalFril = path.join(globalBin, process.platform === 'win32' ? 'fril.cmd' : 'fril');
+  const globalFriladd = path.join(globalBin, process.platform === 'win32' ? 'friladd.cmd' : 'friladd');
+  for (const [executable, expected] of [[globalFril, `fril ${packageVersion}`], [globalFriladd, `friladd ${packageVersion}`]]) {
+    const result = run(executable, ['--version'], consumer, { FRILADD_CONFIG_DIR: configDir });
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), expected);
+  }
 
   const bad = invoke([
     'add',
@@ -102,7 +188,7 @@ try {
     testRegistry,
     '--project',
     project,
-  ]);
+  ], consumer, 'fril');
   assert.equal(add.status, 0, `${add.stdout}\n${add.stderr}`);
   for (const [source, target] of [
     ['EnvelopeReveal.tsx', 'src/components/envelope-reveal/EnvelopeReveal.tsx'],
@@ -124,6 +210,68 @@ try {
       fs.readFileSync(path.join(project, target)),
     );
   }
+  const installedByLegacy = invoke(['installed', '--project', project, '--json'], consumer, 'friladd');
+  assert.equal(installedByLegacy.status, 0, installedByLegacy.stderr);
+  assert.equal(JSON.parse(installedByLegacy.stdout).data.items.length, 1);
+  const statusByLegacy = invoke(['status', '--project', project, '--json'], consumer, 'friladd');
+  assert.equal(statusByLegacy.status, 0, statusByLegacy.stderr);
+  assert.equal(JSON.parse(statusByLegacy.stdout).data.counts.unchanged, 2);
+  const removeByLegacy = invoke(['remove', 'envelope-reveal', '--project', project], consumer, 'friladd');
+  assert.equal(removeByLegacy.status, 0, `${removeByLegacy.stdout}\n${removeByLegacy.stderr}`);
+  const addByLegacy = invoke([
+    'add', 'envelope-reveal', '--registry', testRegistry, '--project', project,
+  ], consumer, 'friladd');
+  assert.equal(addByLegacy.status, 0, `${addByLegacy.stdout}\n${addByLegacy.stderr}`);
+  const firstManagedFile = path.join(project, 'src/components/envelope-reveal/EnvelopeReveal.tsx');
+  fs.unlinkSync(firstManagedFile);
+  const restoreByPrimary = invoke(['restore', 'envelope-reveal', '--project', project], consumer, 'fril');
+  assert.equal(restoreByPrimary.status, 0, `${restoreByPrimary.stdout}\n${restoreByPrimary.stderr}`);
+  assert.equal(fs.readFileSync(firstManagedFile, 'utf8'), fs.readFileSync(path.join(repoRoot, 'registry/fixtures/envelope-reveal/EnvelopeReveal.tsx'), 'utf8'));
+  const finalStatus = invoke(['status', '--project', project, '--json'], consumer, 'friladd');
+  assert.equal(finalStatus.status, 0, finalStatus.stderr);
+  assert.equal(JSON.parse(finalStatus.stdout).data.counts.unchanged, 2);
+  const removeByPrimary = invoke(['remove', 'envelope-reveal', '--project', project], consumer, 'fril');
+  assert.equal(removeByPrimary.status, 0, `${removeByPrimary.stdout}\n${removeByPrimary.stderr}`);
+
+  const makeV2Registry = (directory, version, content) => {
+    fs.mkdirSync(directory, { recursive: true });
+    const bytes = Buffer.from(content);
+    fs.writeFileSync(path.join(directory, 'source.txt'), bytes);
+    const manifest = {
+      schemaVersion: 2,
+      id: 'example.alias-compatibility',
+      name: 'alias-compatibility',
+      items: [{
+        id: 'sample',
+        version,
+        kind: 'component',
+        description: `Alias update fixture ${version}`,
+        files: [{
+          source: 'source.txt',
+          target: 'alias-update.txt',
+          sha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+          size: bytes.length,
+        }],
+      }],
+    };
+    const filename = path.join(directory, 'registry.json');
+    fs.writeFileSync(filename, JSON.stringify(manifest));
+    return filename;
+  };
+  const v2RegistryOne = makeV2Registry(path.join(consumer, 'v2-one'), '1.0.0', 'one');
+  const v2RegistryTwo = makeV2Registry(path.join(consumer, 'v2-two'), '2.0.0', 'two');
+  const v2Project = path.join(consumer, 'v2-alias-project');
+  fs.mkdirSync(v2Project);
+  const v2Add = invoke(['add', 'sample', '--registry', v2RegistryOne, '--project', v2Project], consumer, 'fril');
+  assert.equal(v2Add.status, 0, `${v2Add.stdout}\n${v2Add.stderr}`);
+  const v2Update = invoke(['update', 'sample', '--registry', v2RegistryTwo, '--project', v2Project], consumer, 'friladd');
+  assert.equal(v2Update.status, 0, `${v2Update.stdout}\n${v2Update.stderr}`);
+  assert.equal(fs.readFileSync(path.join(v2Project, 'alias-update.txt'), 'utf8'), 'two');
+  const v2Status = invoke(['status', 'sample', '--project', v2Project, '--json'], consumer, 'fril');
+  assert.equal(v2Status.status, 0, v2Status.stderr);
+  assert.equal(JSON.parse(v2Status.stdout).data.counts.unchanged, 1);
+  const v2Remove = invoke(['remove', 'sample', '--project', v2Project], consumer, 'friladd');
+  assert.equal(v2Remove.status, 0, `${v2Remove.stdout}\n${v2Remove.stderr}`);
 
   const makeRegistry = (directory, entries) => {
     fs.mkdirSync(directory, { recursive: true });
@@ -193,12 +341,17 @@ try {
   ]) {
     const result = invoke([
       'registry', 'add', alias, manifest, '--global', ...(isDefault ? ['--default'] : []),
-    ]);
+    ], consumer, alias === 'registry-a' ? 'fril' : 'friladd');
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   }
   const globalList = invoke(['registry', 'list', '--global']);
   assert.equal(globalList.status, 0, globalList.stderr);
   assert.match(globalList.stdout, /registry-a.*global.*default/s);
+  const registryJsonPrimary = invoke(['registry', 'list', '--global', '--json'], consumer, 'fril');
+  const registryJsonLegacy = invoke(['registry', 'list', '--global', '--json'], consumer, 'friladd');
+  assert.equal(registryJsonPrimary.status, 0, registryJsonPrimary.stderr);
+  assert.equal(registryJsonLegacy.status, 0, registryJsonLegacy.stderr);
+  assert.equal(registryJsonPrimary.stdout, registryJsonLegacy.stdout);
 
   const defaultProject = path.join(consumer, 'default-project');
   fs.mkdirSync(defaultProject);

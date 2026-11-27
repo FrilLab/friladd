@@ -61,8 +61,17 @@ jobs:
           mkdir -p "${RUNNER_TEMP}/friladd-artifact"
           if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
             cp "target/${TARGET_TRIPLE}/release/friladd.exe" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}.exe"
+            cp "target/${TARGET_TRIPLE}/release/fril.exe" "${RUNNER_TEMP}/friladd-artifact/fril-${TARGET_TRIPLE}.exe"
           else
             cp "target/${TARGET_TRIPLE}/release/friladd" "${RUNNER_TEMP}/friladd-artifact/friladd-${TARGET_TRIPLE}"
+            cp "target/${TARGET_TRIPLE}/release/fril" "${RUNNER_TEMP}/friladd-artifact/fril-${TARGET_TRIPLE}"
+          fi
+          if [[ "${TARGET_TRIPLE}" == *windows* ]]; then
+            "target/${TARGET_TRIPLE}/release/fril.exe" --version
+            "target/${TARGET_TRIPLE}/release/friladd.exe" --version
+          else
+            "target/${TARGET_TRIPLE}/release/fril" --version
+            "target/${TARGET_TRIPLE}/release/friladd" --version
           fi
       - uses: actions/upload-artifact@v7
         with:
@@ -81,6 +90,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - id: package-version
         name: Read npm package version
         run: |
@@ -117,6 +129,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/download-artifact@v8
         with:
           name: friladd-npm-tarball

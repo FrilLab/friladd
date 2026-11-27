@@ -2,6 +2,8 @@
 
 This document describes `registry.json`, the component manifest. Registry aliases and defaults live in the separate `.friladd.json` client configuration documented in the repository README; that configuration does not change this manifest schema.
 
+Use `fril` for registry commands. The backward-compatible `friladd` alias reads and writes the same registry configuration and does not change Registry v1 or v2 manifest formats.
+
 A registry is a UTF-8 JSON file. `schemaVersion` must be the integer `1`. The root object contains exactly `schemaVersion`, `name`, and `items`. Each item contains exactly `name`, `description`, and `files`; each file contains exactly `source`, `target`, and `sha256`.
 
 ```json

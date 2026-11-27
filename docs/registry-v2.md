@@ -37,7 +37,7 @@ The existing v1 [component manifest](../registry/registry.json) remains compatib
 - A [composition with documented package requirements](../registry/examples/v2/compositions/registry.json).
 
 ```sh
-friladd registry verify --registry ./registry/examples/v2/components/registry.json
-friladd registry verify --registry ./registry/examples/v2/assets/registry.json
-friladd registry verify --registry ./registry/examples/v2/compositions/registry.json
+fril registry verify --registry ./registry/examples/v2/components/registry.json
+fril registry verify --registry ./registry/examples/v2/assets/registry.json
+fril registry verify --registry ./registry/examples/v2/compositions/registry.json
 ```

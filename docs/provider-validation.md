@@ -12,12 +12,12 @@ Check out FrilAdd at the version being qualified, install its binary in the runn
 FRILADD_SOURCE="${RUNNER_TEMP}/friladd"
 FRILADD_ROOT="${RUNNER_TEMP}/friladd-native"
 cargo install --path "${FRILADD_SOURCE}" --locked --root "${FRILADD_ROOT}"
-"${FRILADD_ROOT}/bin/friladd" registry verify \
+"${FRILADD_ROOT}/bin/fril" registry verify \
   --registry "${GITHUB_WORKSPACE}/registry.json" \
   --json
 ```
 
-On Windows runners, invoke the installed `bin/friladd.exe` path. Keep the provider checkout as the current workflow workspace; only the CLI checkout and binary are placed under the runner's temporary directory.
+On Windows runners, invoke the installed `bin/fril.exe` path. The Cargo install also exposes `bin/friladd` (or `bin/friladd.exe`) as a backward-compatible alias. Keep the provider checkout as the current workflow workspace; only the CLI checkout and binary are placed under the runner's temporary directory.
 
 ## Packed npm CLI
 
@@ -25,7 +25,7 @@ Set `FRILADD_VERSION` to the exact published FrilAdd version that the provider r
 
 ```sh
 npm exec --yes --package="friladd@${FRILADD_VERSION}" -- \
-  friladd registry verify \
+  fril registry verify \
   --registry "${GITHUB_WORKSPACE}/registry.json" \
   --json
 ```

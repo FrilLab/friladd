@@ -2,6 +2,8 @@
 
 ## 0.2.0
 
+- Expose `fril` as the primary Cargo, native release, and npm command while preserving the `friladd` executable alias and version output. Both aliases share the same CLI and project state; the npm tarball continues to contain one platform binary.
+- Use `fril` in current help, errors, examples, and documentation while retaining `friladd` as a supported, non-deprecated alias.
 - Update the locked `url` crate to 2.5.9 to address RUSTSEC-2026-0592 and test non-HTTPS URL rejection.
 - Resolve Registry v2 dependency DAGs across explicitly registered providers and install missing graph items with ownership edges in one transaction.
 - Report aggregated package requirements and advisory npm/pnpm/yarn commands without executing package managers or modifying project manifests.
