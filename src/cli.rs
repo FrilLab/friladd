@@ -947,6 +947,7 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
     let mut reused = BTreeMap::<dependency::ItemKey, lockfile::Item>::new();
     let mut package_requirements = BTreeMap::<String, Vec<serde_json::Value>>::new();
     let mut all_new_bytes = 0_u64;
+    let mut next = before.lock().clone();
 
     for key in &graph.order {
         let node = graph
@@ -1164,6 +1165,50 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
     }));
     crate::registry::validate_targets(project_targets.iter().map(String::as_str))?;
 
+    let mut provenance_changed = false;
+    if updating.is_some() {
+        for (key, reused_item) in &mut reused {
+            let node = &graph.nodes[key];
+            let snapshot = &graph.snapshots[node.snapshot];
+            let (provider_id, declared_source, resolved_source) =
+                candidate_provenance(&snapshot.loaded, &snapshot.declared)?;
+            let mut updated = reused_item.clone();
+            updated.manifest_source = resolved_source.clone();
+            for file in &mut updated.files {
+                file.resolved_source = snapshot.loaded.source.manifest_base(&file.source)?;
+            }
+            if updated.manifest_source != reused_item.manifest_source
+                || updated
+                    .files
+                    .iter()
+                    .zip(&reused_item.files)
+                    .any(|(new, old)| new.resolved_source != old.resolved_source)
+            {
+                provenance_changed = true;
+                let installed = next
+                    .items
+                    .iter_mut()
+                    .find(|item| item.provider_id == key.0 && item.item_id == key.1)
+                    .ok_or("Reused graph item is missing from the lock")?;
+                *installed = updated.clone();
+            }
+            if let Some(provider) = next
+                .providers
+                .iter_mut()
+                .find(|provider| provider.provider_id == provider_id)
+                && (provider.declared_source != declared_source
+                    || provider.resolved_source != resolved_source
+                    || provider.manifest_sha256 != snapshot.loaded.manifest_sha256)
+            {
+                provenance_changed = true;
+                provider.declared_source = declared_source;
+                provider.resolved_source = resolved_source;
+                provider.manifest_sha256 = snapshot.loaded.manifest_sha256.clone();
+            }
+            *reused_item = updated;
+        }
+    }
+
     if pending.is_empty() {
         let root = graph.item(&graph.root)?;
         let root_snapshot = graph.nodes[&graph.root].snapshot;
@@ -1175,6 +1220,12 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
                     .map(move |file| graph_file_json(item, file, "unchanged"))
             })
             .collect::<Vec<_>>();
+        if provenance_changed {
+            let transaction = transaction::Plan::new(before.clone(), next, Vec::new())?;
+            if !dry_run {
+                transaction::apply(project_root, transaction)?;
+            }
+        }
         if updating.is_some() {
             emit_graph_update(json, dry_run, &graph, files, &package_requirements)?;
         } else {
@@ -1226,7 +1277,6 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         )?);
     }
 
-    let mut next = before.lock().clone();
     let mut edits = Vec::new();
     let mut json_files = reused
         .values()

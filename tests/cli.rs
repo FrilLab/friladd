@@ -3552,6 +3552,112 @@ fn graph_install_preserves_distinct_targets_for_a_repeated_source() {
 }
 
 #[test]
+fn update_identical_snapshot_refreshes_manifest_and_artifact_provenance() {
+    use sha2::{Digest, Sha256};
+
+    let original = tempdir().unwrap();
+    let replacement = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    for provider in [original.path(), replacement.path()] {
+        fs::write(provider.join("asset.bin"), b"restorable bytes").unwrap();
+        fs::write(
+            provider.join("registry.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "id": "org.example.provenance",
+                "name": "provenance",
+                "items": [{
+                    "id":"asset", "version":"1.0.0", "kind":"asset",
+                    "files":[{"source":"asset.bin", "target":"asset.bin", "sha256":format!("{:x}",Sha256::digest(b"restorable bytes")), "size":16}]
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let project_path = project.path().display().to_string();
+    let original_manifest = original.path().join("registry.json").display().to_string();
+    let replacement_manifest = replacement
+        .path()
+        .join("registry.json")
+        .display()
+        .to_string();
+    let added = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "asset",
+            "--registry",
+            &original_manifest,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    let lock_path = project.path().join("friladd.lock.json");
+    let before_update = fs::read(&lock_path).unwrap();
+    let dry_update = run_with_config(
+        project.path(),
+        &[
+            "update",
+            "asset",
+            "--registry",
+            &replacement_manifest,
+            "--project",
+            &project_path,
+            "--dry-run",
+        ],
+        global.path(),
+    );
+    assert_eq!(dry_update.status.code(), Some(0), "{dry_update:?}");
+    assert_eq!(fs::read(&lock_path).unwrap(), before_update);
+
+    let updated = run_with_config(
+        project.path(),
+        &[
+            "update",
+            "asset",
+            "--registry",
+            &replacement_manifest,
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(updated.status.code(), Some(0), "{updated:?}");
+    let lock = friladd::lockfile::Lock::parse(&fs::read(&lock_path).unwrap()).unwrap();
+    assert_eq!(
+        lock.items[0].manifest_source,
+        url::Url::from_file_path(
+            fs::canonicalize(replacement.path().join("registry.json")).unwrap()
+        )
+        .unwrap()
+        .as_str()
+    );
+    assert_eq!(
+        lock.items[0].files[0].resolved_source,
+        url::Url::from_file_path(fs::canonicalize(replacement.path().join("asset.bin")).unwrap())
+            .unwrap()
+            .as_str()
+    );
+
+    fs::remove_file(project.path().join("asset.bin")).unwrap();
+    drop(original);
+    let restored = run_with_config(
+        project.path(),
+        &["restore", "asset", "--project", &project_path],
+        global.path(),
+    );
+    assert_eq!(restored.status.code(), Some(0), "{restored:?}");
+    assert_eq!(
+        fs::read(project.path().join("asset.bin")).unwrap(),
+        b"restorable bytes"
+    );
+}
+
+#[test]
 fn diamond_dependencies_share_one_owned_item_and_remove_retains_orphans() {
     use sha2::{Digest, Sha256};
 
