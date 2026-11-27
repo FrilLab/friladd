@@ -1068,6 +1068,23 @@ mod tests {
     }
 
     #[test]
+    fn refuses_non_https_origins_before_origin_or_network_processing() {
+        for locator in [
+            "http://example.com/registry.json",
+            "blob:https://example.com/00000000-0000-0000-0000-000000000000",
+            "file:///tmp/registry.json",
+        ] {
+            let url = Url::parse(locator).unwrap();
+            assert!(
+                fetch_url(&url, 100, "registry")
+                    .unwrap_err()
+                    .contains("HTTPS"),
+                "locator should be rejected before origin processing: {locator}"
+            );
+        }
+    }
+
+    #[test]
     fn downloads_from_https_fixture_and_rejects_http_status_and_size_overflow() {
         let (url, root, handle) = https_fixture("200 OK", 7, "", b"fixture");
         let (bytes, final_url) = fetch_url_with_root(&url, 20, "fixture", Some(root)).unwrap();

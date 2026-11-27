@@ -2,6 +2,7 @@
 
 ## 0.2.0 (release candidate; unpublished)
 
+- Update the locked `url` crate to 2.5.9 to address RUSTSEC-2026-0592 and test non-HTTPS URL rejection.
 - Resolve Registry v2 dependency DAGs across explicitly registered providers and install missing graph items with ownership edges in one transaction.
 - Report aggregated package requirements and advisory npm/pnpm/yarn commands without executing package managers or modifying project manifests.
 - Add read-only `doctor` diagnostics with offline-by-default checks for configuration, lockfiles, transaction recovery, managed-file safety/drift, and package manager lockfiles; optional bounded registry manifest validation is available with `--online`.
