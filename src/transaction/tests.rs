@@ -17,6 +17,7 @@ fn lock(target: &str, contents: &[u8]) -> Lock {
             declared_source: MANIFEST.into(),
             resolved_source: MANIFEST.into(),
             manifest_sha256: "ab".repeat(32),
+            public_identity: None,
         }],
         items: vec![Item {
             provider_id,

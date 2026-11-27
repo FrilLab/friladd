@@ -1,10 +1,10 @@
 # Changelog
 
-## Unreleased — 0.2.x public directory contracts
+## Unreleased — 0.2.x public directory integration
 
-- Specify a strict static public directory schema, reserved official namespaces, immutable review provenance, suspension/replacement rules, CLI precedence, and identity-scoped community consent for issues #39–#43. Public discovery commands are not shipped in this revision.
+- Implement zero-configuration official discovery, exact qualified provider selection, identity-scoped community consent, lock provenance, and public transport for issues #39–#41. Public installs remain unavailable until an entry is independently reviewed and activated in the empty directory.
 - Create the separately maintained public `FrilLab/frilregistry` static directory with local-only validation, submission/review/suspension/rollback policy, and protected `main`. Its canonical endpoint is live and publicly reachable but remains empty pending independent review of the suspended FrilCraft candidate.
-- Add a separate strict public transport and bounded directory parser for #40: HTTPS allowlist, pinned checked DNS answers, disabled proxies/redirects, immutable repository path matching, and exact manifest digest verification. It is not yet wired to a live directory or install workflow.
+- Add a separate strict public transport and bounded directory parser for #40: HTTPS allowlist, pinned checked DNS answers, disabled proxies/redirects, immutable repository path matching, and exact manifest digest verification.
 
 ## 0.2.0
 

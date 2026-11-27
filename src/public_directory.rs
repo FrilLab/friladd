@@ -49,6 +49,18 @@ pub struct Review {
     pub notes: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicIdentity {
+    pub registry_id: String,
+    pub publisher: String,
+    pub tier: String,
+    pub repository: String,
+    pub registry_url: String,
+    pub reviewed_revision: String,
+    pub manifest_sha256: String,
+}
+
 #[derive(Debug)]
 pub struct PublicDirectory {
     pub registries: Vec<DirectoryEntry>,
@@ -86,6 +98,10 @@ struct ReviewDocument {
 }
 
 impl PublicDirectory {
+    pub fn fetch() -> Result<Self, String> {
+        Self::parse(&crate::public_transport::fetch_directory()?)
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() > MAX_DIRECTORY_BYTES {
             return Err(format!(
@@ -150,6 +166,54 @@ impl PublicDirectory {
         self.registries
             .iter()
             .filter(|entry| entry.status == Status::Active)
+    }
+
+    pub(crate) fn load_manifest(
+        entry: &DirectoryEntry,
+    ) -> Result<crate::registry::LoadedRegistry, String> {
+        let repository = ApprovedRepository::new(&entry.repository, &entry.reviewed_revision)?;
+        let url = repository.validate_manifest_url(&entry.registry_url)?;
+        let bytes = crate::public_transport::fetch_verified_manifest(
+            &url,
+            &repository,
+            &entry.manifest_sha256,
+        )?;
+        let loaded = crate::registry::load_public_registry(
+            &entry.registry_url,
+            bytes,
+            repository,
+            entry.clone(),
+        )?;
+        let manifest_provider = loaded
+            .v2
+            .as_ref()
+            .map(|v2| v2.id.as_str())
+            .unwrap_or(loaded.registry.name.as_str());
+        if manifest_provider != entry.id {
+            return Err(format!(
+                "Public registry {} manifest declares a different provider identity",
+                entry.id
+            ));
+        }
+        Ok(loaded)
+    }
+}
+
+impl DirectoryEntry {
+    pub fn public_identity(&self) -> PublicIdentity {
+        PublicIdentity {
+            registry_id: self.id.clone(),
+            publisher: self.publisher.clone(),
+            tier: match self.tier {
+                Tier::Official => "official",
+                Tier::Community => "community",
+            }
+            .to_owned(),
+            repository: self.repository.clone(),
+            registry_url: self.registry_url.clone(),
+            reviewed_revision: self.reviewed_revision.clone(),
+            manifest_sha256: self.manifest_sha256.clone(),
+        }
     }
 }
 

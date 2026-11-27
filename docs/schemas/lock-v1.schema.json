@@ -92,7 +92,24 @@
         },
         "manifestSha256": {
           "$ref": "#/$defs/digest"
+        },
+        "publicIdentity": {
+          "$ref": "#/$defs/publicIdentity"
         }
+      }
+    },
+    "publicIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["registryId", "publisher", "tier", "repository", "registryUrl", "reviewedRevision", "manifestSha256"],
+      "properties": {
+        "registryId": {"type":"string", "minLength":1, "maxLength":128},
+        "publisher": {"type":"string", "minLength":1, "maxLength":128},
+        "tier": {"enum":["official", "community"]},
+        "repository": {"type":"string", "pattern":"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "registryUrl": {"$ref":"#/$defs/locator"},
+        "reviewedRevision": {"type":"string", "pattern":"^[0-9a-f]{40}$"},
+        "manifestSha256": {"$ref":"#/$defs/digest"}
       }
     },
     "content": {

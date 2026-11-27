@@ -66,6 +66,51 @@ fn run_with_config(directory: &Path, args: &[&str], config_dir: &Path) -> Output
         .expect("run friladd")
 }
 
+#[test]
+fn public_registry_discover_uses_live_canonical_directory_without_writes() {
+    let temp = tempdir().unwrap();
+    let output = run_in(temp.path(), &["registry", "discover", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(data["command"], "registry discover");
+    assert!(data["data"]["registries"].as_array().is_some());
+    assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
+}
+
+#[test]
+fn public_selection_rejects_unknown_and_custom_addresses_without_fallback_writes() {
+    let temp = tempdir().unwrap();
+    let output = run_in(
+        temp.path(),
+        &[
+            "add",
+            "unknown/item",
+            "--project",
+            temp.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not in the public directory"));
+    assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
+    let output = run_in(
+        temp.path(),
+        &[
+            "search",
+            "item",
+            "--public",
+            "--registry",
+            "http://127.0.0.1/registry.json",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
+}
+
 fn repo_path(relative: &str) -> String {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(relative)
@@ -128,6 +173,7 @@ fn write_lock(project: &Path, targets: &[(&str, &[u8])]) {
             declared_source: manifest.into(),
             resolved_source: manifest.into(),
             manifest_sha256: format!("{:x}", Sha256::digest(b"manifest")),
+            public_identity: None,
         }],
         items: vec![Item {
             provider_id,
@@ -228,9 +274,9 @@ fn catalog_search_info_and_json_are_deterministic_read_only_and_provider_neutral
         &["search", "needle", "--json"],
         no_default_global.path(),
     );
-    assert_eq!(no_default.status.code(), Some(2));
-    assert!(no_default.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&no_default.stderr).contains("No default registry"));
+    assert_eq!(no_default.status.code(), Some(0), "{no_default:?}");
+    let no_default_json: serde_json::Value = serde_json::from_slice(&no_default.stdout).unwrap();
+    assert!(no_default_json["data"]["items"].is_array());
 
     let explicit_search = run_with_config(
         project.path(),
@@ -1094,6 +1140,7 @@ fn unqualified_duplicate_item_ids_require_a_provider_selector() {
         declared_source: manifest.into(),
         resolved_source: manifest.into(),
         manifest_sha256: format!("{:x}", Sha256::digest(b"other manifest")),
+        public_identity: None,
     });
     lock.items.push(Item {
         provider_id,
@@ -1839,10 +1886,10 @@ fn explicit_project_registration_validates_paths_from_the_invocation_directory()
         config,
         serde_json::json!({"schemaVersion": 1, "registries": {}})
     );
-    assert_cli_error(
-        run_in(root.path(), &["list", "--project", "consumer"]),
-        "No default registry",
-    );
+    let public_list = run_in(root.path(), &["list", "--project", "consumer", "--json"]);
+    assert_eq!(public_list.status.code(), Some(0), "{public_list:?}");
+    let public_json: serde_json::Value = serde_json::from_slice(&public_list.stdout).unwrap();
+    assert!(public_json["data"]["items"].is_array());
     assert_eq!(fs::read_dir(&consumer).unwrap().count(), 1);
 }
 

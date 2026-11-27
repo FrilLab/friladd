@@ -32,6 +32,8 @@ pub struct Provider {
     pub declared_source: String,
     pub resolved_source: String,
     pub manifest_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_identity: Option<crate::public_directory::PublicIdentity>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -180,6 +182,31 @@ impl Lock {
             validate_locator(&provider.declared_source)?;
             validate_locator(&provider.resolved_source)?;
             validate_digest(&provider.manifest_sha256)?;
+            if let Some(identity) = &provider.public_identity {
+                if !matches!(identity.tier.as_str(), "official" | "community")
+                    || identity.registry_id.is_empty()
+                    || identity.publisher.is_empty()
+                    || identity.manifest_sha256 != provider.manifest_sha256
+                {
+                    return Err("Invalid public provider trust record".into());
+                }
+                if identity.registry_id != identity.registry_id.to_ascii_lowercase()
+                    || identity.publisher.is_empty()
+                    || identity.publisher.len() > 128
+                {
+                    return Err("Invalid public provider trust identity".into());
+                }
+                let approved = crate::public_transport::ApprovedRepository::new(
+                    &identity.repository,
+                    &identity.reviewed_revision,
+                )?;
+                approved.validate_manifest_url(&identity.registry_url)?;
+                if provider.resolved_source != identity.registry_url {
+                    return Err(
+                        "Lock public manifest source disagrees with its trust record".into(),
+                    );
+                }
+            }
             if let Some(id) = provider.provider_id.strip_prefix("v2:") {
                 validate_id(id, "provider")?;
             } else if provider.provider_id != v1_provider_id(&provider.resolved_source)? {

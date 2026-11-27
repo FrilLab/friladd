@@ -3,7 +3,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
-    io::{Read, Write},
+    io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -152,6 +152,7 @@ pub struct LockedArtifact {
     pub expected_sha256: String,
     pub expected_size: u64,
     pub max_bytes: usize,
+    pub public_identity: Option<crate::public_directory::PublicIdentity>,
 }
 
 #[derive(Clone, Copy)]
@@ -312,6 +313,33 @@ fn acquire_to_stage(
                 .map_err(|error| format!("Cannot sync staged artifact: {error}"))?;
             Some(final_url.to_string()).map(|locator| (locator, size, sha256))
         }
+        RegistrySource::PublicRemote {
+            manifest_url,
+            approved_repository,
+            ..
+        } => {
+            let source_path = validate_relative_path(file_source, "source")?;
+            let url = approved_repository.artifact_url(manifest_url, &source_path)?;
+            let bytes = crate::public_transport::fetch_artifact(
+                &url,
+                manifest_url,
+                approved_repository,
+                max_bytes,
+            )?;
+            let (size, sha256) = copy_verified(
+                &mut Cursor::new(bytes),
+                staged.as_file_mut(),
+                max_bytes,
+                expected_sha256,
+                expected_size,
+                &format!("file {file_source}"),
+            )?;
+            staged
+                .as_file()
+                .sync_all()
+                .map_err(|error| format!("Cannot sync staged artifact: {error}"))?;
+            Some((url.to_string(), size, sha256))
+        }
     };
     let (resolved_locator, size, sha256) =
         resolved_locator.ok_or("Internal error: remote artifact has no resolved locator")?;
@@ -405,59 +433,83 @@ fn acquire_locked_to_stage(
             (None, size, hash)
         }
         "https" => {
-            if locator.host_str().is_none()
-                || !locator.username().is_empty()
-                || locator.password().is_some()
-                || locator.query().is_some()
-                || locator.fragment().is_some()
-            {
-                return Err(
-                    "Locked HTTPS artifact locator contains credentials or a suffix".into(),
-                );
+            if let Some(identity) = &request.public_identity {
+                let repository = crate::public_transport::ApprovedRepository::new(
+                    &identity.repository,
+                    &identity.reviewed_revision,
+                )?;
+                let manifest = repository.validate_manifest_url(&identity.registry_url)?;
+                let artifact = repository.validate_artifact_url(&manifest, &locator)?;
+                let bytes = crate::public_transport::fetch_artifact(
+                    &artifact,
+                    &manifest,
+                    &repository,
+                    request.max_bytes,
+                )?;
+                let (size, hash) = copy_verified(
+                    &mut Cursor::new(bytes),
+                    staged.as_file_mut(),
+                    request.max_bytes,
+                    &request.expected_sha256,
+                    Some(request.expected_size),
+                    "locked public artifact",
+                )?;
+                (Some(locator.to_string()), size, hash)
+            } else {
+                if locator.host_str().is_none()
+                    || !locator.username().is_empty()
+                    || locator.password().is_some()
+                    || locator.query().is_some()
+                    || locator.fragment().is_some()
+                {
+                    return Err(
+                        "Locked HTTPS artifact locator contains credentials or a suffix".into(),
+                    );
+                }
+                let mut response = client.get(locator.clone()).send().map_err(|error| {
+                    let reason = if error.is_timeout() {
+                        "request timed out"
+                    } else if error.is_connect() {
+                        "could not establish a connection"
+                    } else if error.is_redirect() {
+                        "redirect rejected by HTTPS same-origin policy or redirect limit"
+                    } else {
+                        "request failed"
+                    };
+                    format!(
+                        "Could not restore locked artifact from {} ({reason})",
+                        locator.origin().ascii_serialization()
+                    )
+                })?;
+                if !response.status().is_success() {
+                    return Err(format!(
+                        "Locked artifact request failed with HTTP {} ({})",
+                        response.status(),
+                        locator.origin().ascii_serialization()
+                    ));
+                }
+                if response
+                    .content_length()
+                    .is_some_and(|length| length > request.max_bytes as u64)
+                {
+                    return Err(format!(
+                        "Locked artifact exceeds the {} byte limit",
+                        request.max_bytes
+                    ));
+                }
+                let mut final_url = response.url().clone();
+                final_url.set_query(None);
+                final_url.set_fragment(None);
+                let (size, hash) = copy_verified(
+                    &mut response,
+                    staged.as_file_mut(),
+                    request.max_bytes,
+                    &request.expected_sha256,
+                    Some(request.expected_size),
+                    "locked artifact",
+                )?;
+                (Some(final_url.to_string()), size, hash)
             }
-            let mut response = client.get(locator.clone()).send().map_err(|error| {
-                let reason = if error.is_timeout() {
-                    "request timed out"
-                } else if error.is_connect() {
-                    "could not establish a connection"
-                } else if error.is_redirect() {
-                    "redirect rejected by HTTPS same-origin policy or redirect limit"
-                } else {
-                    "request failed"
-                };
-                format!(
-                    "Could not restore locked artifact from {} ({reason})",
-                    locator.origin().ascii_serialization()
-                )
-            })?;
-            if !response.status().is_success() {
-                return Err(format!(
-                    "Locked artifact request failed with HTTP {} ({})",
-                    response.status(),
-                    locator.origin().ascii_serialization()
-                ));
-            }
-            if response
-                .content_length()
-                .is_some_and(|length| length > request.max_bytes as u64)
-            {
-                return Err(format!(
-                    "Locked artifact exceeds the {} byte limit",
-                    request.max_bytes
-                ));
-            }
-            let mut final_url = response.url().clone();
-            final_url.set_query(None);
-            final_url.set_fragment(None);
-            let (size, hash) = copy_verified(
-                &mut response,
-                staged.as_file_mut(),
-                request.max_bytes,
-                &request.expected_sha256,
-                Some(request.expected_size),
-                "locked artifact",
-            )?;
-            (Some(final_url.to_string()), size, hash)
         }
         _ => return Err("Locked artifacts must use file or HTTPS locators".into()),
     };
@@ -907,6 +959,7 @@ mod tests {
             expected_sha256: digest.clone(),
             expected_size: bytes.len() as u64,
             max_bytes: MAX_FILE_BYTES,
+            public_identity: None,
         };
         let acquired = acquire_locked_files(std::slice::from_ref(&request)).unwrap();
         assert_eq!(fs::read(&acquired.files[0].path).unwrap(), bytes);
@@ -942,6 +995,7 @@ mod tests {
                 expected_sha256: "0".repeat(64),
                 expected_size: 5,
                 max_bytes: MAX_FILE_BYTES,
+                public_identity: None,
             }])
             .is_err()
         );

@@ -1,6 +1,6 @@
 use crate::{
     config::{self, Config, RegistryEntry, Scope},
-    dependency, downloader, lockfile, planner, registry, resolver, transaction,
+    dependency, downloader, lockfile, planner, public_directory, registry, resolver, transaction,
 };
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::{
@@ -92,13 +92,16 @@ struct UpdateArgs {
     item: String,
     /// Explicit candidate alias, local manifest path, or HTTPS manifest URL.
     #[arg(long, value_name = "ALIAS_OR_SOURCE")]
-    registry: String,
+    registry: Option<String>,
     /// Require this exact Registry v2 version from the selected snapshot.
     #[arg(long, value_name = "VERSION")]
     version: Option<String>,
     /// Permit an explicit Registry v2 downgrade.
     #[arg(long)]
     allow_downgrade: bool,
+    /// Explicitly authorize this exact community registry ID (repeatable).
+    #[arg(long = "trust-community", value_name = "REGISTRY_ID")]
+    trust_community: Vec<String>,
     /// Project root (defaults to the current directory).
     #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
@@ -151,8 +154,11 @@ struct ListArgs {
     #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
     /// Search every configured effective registry.
-    #[arg(long, conflicts_with_all = ["registry", "registry_alias"])]
+    #[arg(long, conflicts_with_all = ["registry", "registry_alias", "public"])]
     all_registries: bool,
+    /// Search approved public directory entries.
+    #[arg(long, conflicts_with_all = ["registry", "registry_alias", "all_registries"])]
+    public: bool,
     /// Emit versioned JSON output.
     #[arg(long)]
     json: bool,
@@ -169,6 +175,9 @@ struct SearchArgs {
     registry: Option<String>,
     #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
+    #[arg(long, conflicts_with_all = ["registry", "all_registries"])]
+    /// Search approved public directory entries.
+    public: bool,
     #[arg(long)]
     all_registries: bool,
     #[arg(long)]
@@ -226,9 +235,21 @@ struct AddArgs {
     /// Emit versioned JSON output.
     #[arg(long)]
     json: bool,
+    /// Explicitly authorize this exact community registry ID (repeatable).
+    #[arg(long = "trust-community", value_name = "REGISTRY_ID")]
+    trust_community: Vec<String>,
 }
 #[derive(Debug, Subcommand)]
 enum RegistryCommand {
+    /// Discover registries in the curated public directory without changing configuration.
+    #[command(after_help = "Example: fril registry discover frilcraft --json")]
+    Discover {
+        /// Optional exact public registry ID.
+        registry: Option<String>,
+        /// Emit versioned JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Verify all declared source files and hashes without installing anything.
     #[command(after_help = "Example: fril registry verify --registry ./registry.json")]
     Verify(RegistryVerifyArgs),
@@ -360,8 +381,236 @@ fn project_config_path(project: Option<PathBuf>) -> Result<PathBuf, String> {
     };
     Ok(config::project_path(&root))
 }
+
+const MAX_PUBLIC_REGISTRIES: usize = 64;
+
+fn split_item_selector(component: &str) -> Result<(Option<&str>, &str), String> {
+    match component.split_once('/') {
+        Some((alias, item)) if !alias.is_empty() && !item.is_empty() && !item.contains('/') => {
+            Ok((Some(alias), item))
+        }
+        None if !component.is_empty() => Ok((None, component)),
+        _ => Err("Invalid component identifier; use item or registry/item".into()),
+    }
+}
+
+fn configured_alias_exists(alias: &str, project: &Path, global: &Path) -> Result<bool, String> {
+    let effective = resolver::effective_registries(project, global)?;
+    Ok(effective.iter().any(|(name, _)| name == alias))
+}
+
+fn selected_entry_manifest(loaded: &registry::LoadedRegistry) -> Result<String, String> {
+    match &loaded.source {
+        registry::RegistrySource::PublicRemote { manifest_url, .. } => Ok(manifest_url.to_string()),
+        _ => Err("Expected a curated public manifest".into()),
+    }
+}
+
+fn authorize_community(
+    entry: &public_directory::DirectoryEntry,
+    explicit: &[String],
+    project_root: &Path,
+) -> Result<(), String> {
+    if entry.tier != public_directory::Tier::Community {
+        return Ok(());
+    }
+    let lock = lockfile::load(project_root)?;
+    let identity = entry.public_identity();
+    if lock.lock().providers.iter().any(|p| {
+        p.public_identity.as_ref().is_some_and(|locked| {
+            locked.registry_id == identity.registry_id
+                && locked.tier == "community"
+                && locked.publisher == identity.publisher
+                && locked.repository == identity.repository
+        })
+    }) {
+        return Ok(());
+    }
+    if explicit.iter().any(|id| id == &entry.id) {
+        return Ok(());
+    }
+    Err(format!(
+        "Community registry '{}' requires explicit trust. Re-run with --trust-community {} after reviewing its publisher and provenance.",
+        entry.id, entry.id
+    ))
+}
+
+fn public_catalog_entries(
+    include_community: bool,
+) -> Result<Vec<(public_directory::DirectoryEntry, registry::LoadedRegistry)>, String> {
+    let directory = public_directory::PublicDirectory::fetch()
+        .map_err(|error| format!("Public directory failed: {error}"))?;
+    let entries = directory
+        .registries
+        .into_iter()
+        .filter(|entry| {
+            entry.status == public_directory::Status::Active
+                && (include_community || entry.tier == public_directory::Tier::Official)
+        })
+        .collect::<Vec<_>>();
+    if entries.len() > MAX_PUBLIC_REGISTRIES {
+        return Err(format!(
+            "Public directory selection exceeds the {MAX_PUBLIC_REGISTRIES} registry request limit"
+        ));
+    }
+    entries
+        .into_iter()
+        .map(|entry| {
+            let loaded = public_directory::PublicDirectory::load_manifest(&entry)
+                .map_err(|error| format!("Public registry '{}' failed: {error}", entry.id))?;
+            Ok((entry, loaded))
+        })
+        .collect()
+}
+
+fn print_public_list(
+    loaded: &[(public_directory::DirectoryEntry, registry::LoadedRegistry)],
+    json: bool,
+) -> Result<(), String> {
+    let mut items = loaded
+        .iter()
+        .flat_map(|(_, registry)| list_item_json(registry, None))
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        (left["provider"].as_str(), left["id"].as_str())
+            .cmp(&(right["provider"].as_str(), right["id"].as_str()))
+    });
+    if json {
+        print_catalog_json("list", serde_json::json!({"items": items}));
+    } else {
+        print_catalog_human(&items);
+    }
+    Ok(())
+}
+
+fn catalog_item_matches(item: &serde_json::Value, query: &str) -> bool {
+    let text = [
+        item["id"].as_str().unwrap_or_default(),
+        item["name"].as_str().unwrap_or_default(),
+        item["description"].as_str().unwrap_or_default(),
+        item["kind"].as_str().unwrap_or_default(),
+    ]
+    .into_iter()
+    .chain(
+        item["tags"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tag| tag.as_str()),
+    )
+    .collect::<Vec<_>>()
+    .join(" ")
+    .to_lowercase();
+    text.contains(query)
+}
+
+#[cfg(test)]
+mod public_trust_tests {
+    use super::*;
+
+    #[test]
+    fn community_consent_is_exact_and_identity_scoped() {
+        let temp = tempfile::tempdir().unwrap();
+        let config_dir = temp.path().join("config");
+        fs::create_dir(&config_dir).unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let identity = public_directory::PublicIdentity {
+            registry_id: "community-tools".into(), publisher: "example".into(), tier: "community".into(),
+            repository: "https://github.com/example/tools".into(), registry_url: "https://raw.githubusercontent.com/example/tools/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/registry.json".into(),
+            reviewed_revision: "a".repeat(40), manifest_sha256: "b".repeat(64),
+        };
+        let lock = lockfile::Lock {
+            providers: vec![lockfile::Provider {
+                provider_id: lockfile::v1_provider_id(&identity.registry_url).unwrap(),
+                declared_source: identity.registry_url.clone(),
+                resolved_source: identity.registry_url.clone(),
+                manifest_sha256: identity.manifest_sha256.clone(),
+                public_identity: Some(identity.clone()),
+            }],
+            ..lockfile::Lock::default()
+        };
+        fs::write(project.join(lockfile::NAME), lock.encode().unwrap()).unwrap();
+        let entry = public_directory::DirectoryEntry {
+            id: identity.registry_id.clone(),
+            display_name: "Community".into(),
+            description: "tools".into(),
+            registry_url: identity.registry_url.clone(),
+            repository: identity.repository.clone(),
+            publisher: identity.publisher.clone(),
+            tier: public_directory::Tier::Community,
+            status: public_directory::Status::Active,
+            reviewed_revision: identity.reviewed_revision.clone(),
+            manifest_sha256: identity.manifest_sha256.clone(),
+            review: public_directory::Review {
+                reviewed_at: "2026-01-01T00:00:00Z".into(),
+                reviewer: "reviewer".into(),
+                notes: "review".into(),
+            },
+        };
+        assert!(authorize_community(&entry, &[], &project).is_ok());
+        let wrong = public_directory::DirectoryEntry {
+            id: "other-id".into(),
+            ..entry.clone()
+        };
+        assert!(authorize_community(&wrong, &[], &project).is_err());
+        assert!(authorize_community(&wrong, &["community-tools".into()], &project).is_err());
+        assert!(authorize_community(&wrong, &["other-id".into()], &project).is_ok());
+    }
+}
+
+fn discover_registry(registry: Option<&str>, json: bool) -> Result<(), String> {
+    let directory = public_directory::PublicDirectory::fetch()
+        .map_err(|error| format!("Public directory failed: {error}"))?;
+    let entries = if let Some(registry) = registry {
+        vec![
+            directory
+                .get(registry)
+                .ok_or_else(|| format!("Public registry '{registry}' was not found"))?,
+        ]
+    } else {
+        directory.registries.iter().collect::<Vec<_>>()
+    };
+    let rows = entries
+        .into_iter()
+        .map(|entry| {
+            serde_json::json!({
+                "id": entry.id,
+                "displayName": entry.display_name,
+                "description": entry.description,
+                "registryUrl": entry.registry_url,
+                "repository": entry.repository,
+                "publisher": entry.publisher,
+                "tier": match entry.tier { public_directory::Tier::Official => "official", public_directory::Tier::Community => "community" },
+                "status": match entry.status { public_directory::Status::Active => "active", public_directory::Status::Deprecated => "deprecated", public_directory::Status::Suspended => "suspended" },
+                "reviewedRevision": entry.reviewed_revision,
+                "manifestSha256": entry.manifest_sha256,
+                "review": { "reviewedAt": entry.review.reviewed_at, "reviewer": entry.review.reviewer, "notes": entry.review.notes }
+            })
+        })
+        .collect::<Vec<_>>();
+    if json {
+        print_catalog_json("registry discover", serde_json::json!({"registries": rows}));
+    } else {
+        for row in rows {
+            println!(
+                "{}\t{}\t{}\t{}",
+                row["id"].as_str().unwrap_or_default(),
+                row["tier"].as_str().unwrap_or_default(),
+                row["status"].as_str().unwrap_or_default(),
+                terminal_safe(row["displayName"].as_str().unwrap_or_default())
+            );
+        }
+    }
+    Ok(())
+}
+
 fn list(args: ListArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
+    if args.public {
+        let loaded = public_catalog_entries(true)?;
+        return print_public_list(&loaded, args.json);
+    }
     if args.all_registries {
         let registries = resolver::effective_registries(&project, &global)?;
         let mut items = Vec::new();
@@ -381,12 +630,19 @@ fn list(args: ListArgs) -> Result<(), String> {
         }
         return Ok(());
     }
-    let selection = resolver::resolve_list_selection(
-        args.registry.as_deref(),
-        args.registry_alias.as_deref(),
-        &project,
-        &global,
-    )?;
+    let selection = if args.registry.is_none() && args.registry_alias.is_none() {
+        match resolver::resolve_optional_default(&project, &global)? {
+            Some(selection) => selection,
+            None => return print_public_list(&public_catalog_entries(false)?, args.json),
+        }
+    } else {
+        resolver::resolve_list_selection(
+            args.registry.as_deref(),
+            args.registry_alias.as_deref(),
+            &project,
+            &global,
+        )?
+    };
     let loaded = registry::load_registry(&selection.manifest)?;
     let mut items = list_item_json(&loaded, selection.alias.as_deref());
     items.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
@@ -414,6 +670,34 @@ fn search(args: SearchArgs) -> Result<(), String> {
         return Err("Search query cannot be empty".into());
     }
     let (project, global) = roots(args.project)?;
+    let public_entries = if args.public {
+        Some(public_catalog_entries(true)?)
+    } else if args.registry.is_none() && !args.all_registries {
+        if resolver::resolve_optional_default(&project, &global)?.is_none() {
+            Some(public_catalog_entries(false)?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    if let Some(loaded) = public_entries {
+        let query = args.query.to_lowercase();
+        let items = loaded
+            .iter()
+            .flat_map(|(_, registry)| list_item_json(registry, None))
+            .filter(|item| catalog_item_matches(item, &query))
+            .collect::<Vec<_>>();
+        if args.json {
+            print_catalog_json(
+                "search",
+                serde_json::json!({"query": args.query, "items": items}),
+            );
+        } else {
+            print_catalog_human(&items);
+        }
+        return Ok(());
+    }
     let registries = if args.all_registries {
         resolver::effective_registries(&project, &global)?
             .into_iter()
@@ -442,26 +726,7 @@ fn search(args: SearchArgs) -> Result<(), String> {
         items.extend(
             list_item_json(&loaded, alias.as_deref())
                 .into_iter()
-                .filter(|item| {
-                    let text = [
-                        item["id"].as_str().unwrap_or_default(),
-                        item["name"].as_str().unwrap_or_default(),
-                        item["description"].as_str().unwrap_or_default(),
-                        item["kind"].as_str().unwrap_or_default(),
-                    ]
-                    .into_iter()
-                    .chain(
-                        item["tags"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(|tag| tag.as_str()),
-                    )
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase();
-                    text.contains(&query)
-                }),
+                .filter(|item| catalog_item_matches(item, &query)),
         );
     }
     items.sort_by(|a, b| {
@@ -479,13 +744,34 @@ fn search(args: SearchArgs) -> Result<(), String> {
 }
 fn info(args: InfoArgs) -> Result<(), String> {
     let (project, global) = roots(args.project)?;
-    let resolution =
-        resolver::resolve_add(&args.item, args.registry.as_deref(), &project, &global)?;
-    let loaded = registry::load_registry(&resolution.manifest)?;
+    let (alias, requested_item) = split_item_selector(&args.item)?;
+    let (item_id, loaded) = if let Some(alias) = alias.filter(|_| args.registry.is_none())
+        && !configured_alias_exists(alias, &project, &global)?
+    {
+        let directory = public_directory::PublicDirectory::fetch()
+            .map_err(|error| format!("Public directory failed: {error}"))?;
+        let entry = directory
+            .get(alias)
+            .ok_or_else(|| format!("Public registry '{alias}' was not found"))?;
+        if entry.status != public_directory::Status::Active {
+            return Err(format!("Public registry '{}' is not active", entry.id));
+        }
+        (
+            requested_item.to_owned(),
+            public_directory::PublicDirectory::load_manifest(entry)?,
+        )
+    } else {
+        let resolution =
+            resolver::resolve_add(&args.item, args.registry.as_deref(), &project, &global)?;
+        (
+            resolution.item.to_owned(),
+            registry::load_registry(&resolution.manifest)?,
+        )
+    };
     let item = loaded
         .registry
-        .find(resolution.item)
-        .ok_or_else(|| format!("Item not found: {}", resolution.item.escape_debug()))?;
+        .find(&item_id)
+        .ok_or_else(|| format!("Item not found: {}", item_id.escape_debug()))?;
     let provider = loaded
         .v2
         .as_ref()
@@ -494,7 +780,7 @@ fn info(args: InfoArgs) -> Result<(), String> {
     let mut result = serde_json::json!({"provider": provider, "id": item.name, "name": item.name, "description": item.description, "files": item.files.iter().map(|file| serde_json::json!({"source": file.source, "target": file.target, "sha256": file.sha256})).collect::<Vec<_>>()});
     result["manifestSha256"] = serde_json::json!(loaded.manifest_sha256);
     if let Some(v2) = &loaded.v2 {
-        let meta = v2.select(resolution.item, None)?;
+        let meta = v2.select(&item_id, None)?;
         result["version"] = serde_json::json!(meta.version);
         result["kind"] = serde_json::json!(meta.kind);
         result["tags"] = serde_json::json!(meta.tags);
@@ -521,7 +807,7 @@ fn info(args: InfoArgs) -> Result<(), String> {
         println!("Provider: {provider}");
         println!("Manifest SHA-256: {}", loaded.manifest_sha256);
         if let Some(meta) = &loaded.v2 {
-            let item_meta = meta.select(resolution.item, None)?;
+            let item_meta = meta.select(&item_id, None)?;
             println!("Version: {}", item_meta.version);
             println!("Kind: {:?}", item_meta.kind);
             if !item_meta.tags.is_empty() {
@@ -541,7 +827,7 @@ fn info(args: InfoArgs) -> Result<(), String> {
             );
         }
         if let Some(meta) = &loaded.v2 {
-            let item_meta = meta.select(resolution.item, None)?;
+            let item_meta = meta.select(&item_id, None)?;
             for file in &item_meta.files {
                 println!("Size: {} {} bytes", file.target, file.size);
             }
@@ -567,6 +853,9 @@ fn list_item_json(
 ) -> Vec<serde_json::Value> {
     loaded.registry.items.iter().map(|item| {
         let mut value = serde_json::json!({"provider": loaded.v2.as_ref().map(|v2| v2.id.as_str()).unwrap_or(loaded.registry.name.as_str()), "registry": loaded.registry.name, "id": item.name, "name": item.name, "description": item.description});
+        if let registry::RegistrySource::PublicRemote { entry, .. } = &loaded.source {
+            value["public"] = serde_json::json!({"registryId":entry.id, "tier":if entry.tier == public_directory::Tier::Official {"official"} else {"community"}, "publisher":entry.publisher});
+        }
         if let Some(alias) = alias { value["alias"] = serde_json::json!(alias); }
         if let Some(meta) = loaded.v2.as_ref().and_then(|v2| v2.items.iter().find(|entry| entry.id == item.name)) {
             value["version"] = serde_json::json!(meta.version); value["kind"] = serde_json::json!(meta.kind); value["tags"] = serde_json::json!(meta.tags);
@@ -605,15 +894,54 @@ fn terminal_safe(value: &str) -> String {
 fn add(args: AddArgs) -> Result<(), String> {
     let (project_config, global) = roots(args.project.clone())?;
     let project_root = project_config.parent().unwrap().to_path_buf();
-    let resolution = resolver::resolve_add(
-        &args.component,
-        args.registry.as_deref(),
-        &project_config,
-        &global,
-    )?;
-    let selected_manifest = resolution.manifest;
-    let selected_item = resolution.item.to_owned();
-    let loaded = registry::load_registry(&selected_manifest)?;
+    let (alias, requested_item) = split_item_selector(&args.component)?;
+    let mut public_entry = None;
+    let (selected_manifest, selected_item, loaded) = if args.registry.is_none() {
+        if let Some(alias) = alias {
+            if configured_alias_exists(alias, &project_config, &global)? {
+                let selection = resolver::resolve_registry_selection(
+                    None,
+                    Some(alias),
+                    &project_config,
+                    &global,
+                )?
+                .ok_or_else(|| format!("Configured registry '{alias}' was not found"))?;
+                let loaded = registry::load_registry(&selection.manifest)?;
+                (selection.manifest, requested_item.to_owned(), loaded)
+            } else {
+                let directory = public_directory::PublicDirectory::fetch()
+                    .map_err(|error| format!("Public directory failed: {error}"))?;
+                let entry = directory.get(alias).ok_or_else(|| format!("Registry alias '{alias}' is not registered and is not in the public directory"))?.clone();
+                if entry.status != public_directory::Status::Active {
+                    return Err(format!("Public registry '{alias}' is not active"));
+                }
+                authorize_community(&entry, &args.trust_community, &project_root)?;
+                let loaded = public_directory::PublicDirectory::load_manifest(&entry)?;
+                public_entry = Some(entry);
+                (
+                    selected_entry_manifest(&loaded)?,
+                    requested_item.to_owned(),
+                    loaded,
+                )
+            }
+        } else if let Some(selection) =
+            resolver::resolve_optional_default(&project_config, &global)?
+        {
+            let loaded = registry::load_registry(&selection.manifest)?;
+            (selection.manifest, requested_item.to_owned(), loaded)
+        } else {
+            return Err("No default registry is configured. Use a qualified public ID such as frilcraft/item.".into());
+        }
+    } else {
+        let resolution = resolver::resolve_add(
+            &args.component,
+            args.registry.as_deref(),
+            &project_config,
+            &global,
+        )?;
+        let loaded = registry::load_registry(&resolution.manifest)?;
+        (resolution.manifest, resolution.item.to_owned(), loaded)
+    };
     let item = loaded
         .registry
         .find(&selected_item)
@@ -635,6 +963,9 @@ fn add(args: AddArgs) -> Result<(), String> {
             root_item_id: &root_item_id,
             updating: None,
             allow_downgrade: false,
+            root_public_identity: public_entry.as_ref().map(|entry| entry.public_identity()),
+            trust_community: args.trust_community,
+            project_lock: &project_root,
         });
     }
     if !args.dry_run {
@@ -655,7 +986,8 @@ fn add(args: AddArgs) -> Result<(), String> {
             declared_manifest_locator = url.to_string();
             url
         }
-        registry::RegistrySource::Remote { manifest_url } => {
+        registry::RegistrySource::Remote { manifest_url }
+        | registry::RegistrySource::PublicRemote { manifest_url, .. } => {
             let url = sanitized_remote_locator(manifest_url.as_str())?;
             let declared = sanitized_remote_locator(&selected_manifest)?;
             if let Some(v2) = &loaded.v2 {
@@ -728,6 +1060,7 @@ fn add(args: AddArgs) -> Result<(), String> {
             declared_source: declared_manifest_locator,
             resolved_source: manifest_locator.clone(),
             manifest_sha256: manifest_digest.clone(),
+            public_identity: public_entry.as_ref().map(|entry| entry.public_identity()),
         });
     }
     let same = next
@@ -921,6 +1254,9 @@ struct GraphRequest<'a> {
     root_item_id: &'a str,
     updating: Option<lockfile::Item>,
     allow_downgrade: bool,
+    root_public_identity: Option<public_directory::PublicIdentity>,
+    trust_community: Vec<String>,
+    project_lock: &'a Path,
 }
 
 fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
@@ -935,6 +1271,9 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         root_item_id,
         updating,
         allow_downgrade,
+        root_public_identity,
+        trust_community,
+        project_lock,
     } = request;
     if !dry_run {
         transaction::recover(project_root)?;
@@ -946,6 +1285,33 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         project_config,
         global_config,
     )?;
+    let lock_before_graph = lockfile::load(project_lock)?;
+    let root_loaded_identity = match &graph.snapshots[0].loaded.source {
+        registry::RegistrySource::PublicRemote { entry, .. } => Some(entry.public_identity()),
+        _ => root_public_identity,
+    };
+    for snapshot in &graph.snapshots {
+        if let registry::RegistrySource::PublicRemote { entry, .. } = &snapshot.loaded.source {
+            authorize_community(entry, &trust_community, project_lock)?;
+            let identity = entry.public_identity();
+            if entry.tier == public_directory::Tier::Community
+                && !trust_community.iter().any(|id| id == &entry.id)
+                && !lock_before_graph.lock().providers.iter().any(|p| {
+                    p.public_identity.as_ref().is_some_and(|locked| {
+                        locked.registry_id == identity.registry_id
+                            && locked.tier == "community"
+                            && locked.publisher == identity.publisher
+                            && locked.repository == identity.repository
+                    })
+                })
+            {
+                return Err(format!(
+                    "Community dependency '{}' requires explicit trust via --trust-community {}",
+                    entry.id, entry.id
+                ));
+            }
+        }
+    }
     let before = lockfile::load(project_root)?;
     let owners = before.lock().owners();
     let target_map = crate::registry_v2::TargetMap::load(project_root)?;
@@ -1204,12 +1570,25 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
                 .find(|provider| provider.provider_id == provider_id)
                 && (provider.declared_source != declared_source
                     || provider.resolved_source != resolved_source
-                    || provider.manifest_sha256 != snapshot.loaded.manifest_sha256)
+                    || provider.manifest_sha256 != snapshot.loaded.manifest_sha256
+                    || provider.public_identity
+                        != match &snapshot.loaded.source {
+                            registry::RegistrySource::PublicRemote { entry, .. } => {
+                                Some(entry.public_identity())
+                            }
+                            _ => None,
+                        })
             {
                 provenance_changed = true;
                 provider.declared_source = declared_source;
                 provider.resolved_source = resolved_source;
                 provider.manifest_sha256 = snapshot.loaded.manifest_sha256.clone();
+                provider.public_identity = match &snapshot.loaded.source {
+                    registry::RegistrySource::PublicRemote { entry, .. } => {
+                        Some(entry.public_identity())
+                    }
+                    _ => None,
+                };
             }
             *reused_item = updated;
         }
@@ -1301,11 +1680,22 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
             .iter()
             .any(|provider| provider.provider_id == planned.provider_id)
         {
+            let public_identity = if snapshot.identity == graph.snapshots[0].identity {
+                root_loaded_identity.clone()
+            } else {
+                match &snapshot.loaded.source {
+                    registry::RegistrySource::PublicRemote { entry, .. } => {
+                        Some(entry.public_identity())
+                    }
+                    _ => None,
+                }
+            };
             next.providers.push(lockfile::Provider {
                 provider_id: planned.provider_id.clone(),
                 declared_source: planned.declared_source.clone(),
                 resolved_source: planned.resolved_source.clone(),
                 manifest_sha256: snapshot.loaded.manifest_sha256.clone(),
+                public_identity,
             });
         } else if planned.existing.is_some() {
             let provider = next
@@ -1316,6 +1706,12 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
             provider.declared_source = planned.declared_source.clone();
             provider.resolved_source = planned.resolved_source.clone();
             provider.manifest_sha256 = snapshot.loaded.manifest_sha256.clone();
+            provider.public_identity = match &snapshot.loaded.source {
+                registry::RegistrySource::PublicRemote { entry, .. } => {
+                    Some(entry.public_identity())
+                }
+                _ => None,
+            };
         }
         let dependencies = node
             .dependencies
@@ -1535,7 +1931,8 @@ impl ManifestBase for registry::RegistrySource {
                 .join(source)
                 .map(|url| url.to_string())
                 .map_err(|_| "Invalid resolved artifact locator".into()),
-            registry::RegistrySource::Remote { manifest_url } => manifest_url
+            registry::RegistrySource::Remote { manifest_url }
+            | registry::RegistrySource::PublicRemote { manifest_url, .. } => manifest_url
                 .join(source)
                 .map(|url| {
                     let mut url = url;
@@ -2213,7 +2610,8 @@ fn candidate_provenance(
             )?;
             Ok((provider, locator.clone(), locator))
         }
-        registry::RegistrySource::Remote { manifest_url } => {
+        registry::RegistrySource::Remote { manifest_url }
+        | registry::RegistrySource::PublicRemote { manifest_url, .. } => {
             let resolved = sanitized_remote_locator(manifest_url.as_str())?.to_string();
             let declared = sanitized_remote_locator(declared)?.to_string();
             let provider = loaded.v2.as_ref().map_or_else(
@@ -2250,10 +2648,49 @@ fn update(args: UpdateArgs) -> Result<(), String> {
     let before_lock = snapshot.lock().clone();
     let existing =
         select_mutation_item(&before_lock, &args.item, &project_config, &global)?.clone();
-    let candidate = args.registry.as_str();
-    let candidate_location =
-        resolver::resolve_list(Some(candidate), None, &project_config, &global)?;
-    let loaded = registry::load_registry(&candidate_location)?;
+    let previous_public = before_lock
+        .providers
+        .iter()
+        .find(|provider| provider.provider_id == existing.provider_id)
+        .and_then(|provider| provider.public_identity.as_ref());
+    let public_entry = if let Some(identity) = previous_public {
+        let directory = public_directory::PublicDirectory::fetch()
+            .map_err(|error| format!("Public directory failed: {error}"))?;
+        let entry = directory
+            .get(&identity.registry_id)
+            .ok_or_else(|| {
+                format!(
+                    "Public provider '{}' is no longer listed",
+                    identity.registry_id
+                )
+            })?
+            .clone();
+        if entry.status != public_directory::Status::Active
+            || entry.repository != identity.repository
+            || entry.publisher != identity.publisher
+        {
+            return Err(format!(
+                "Public provider '{}' is suspended, inactive, or has changed identity; refusing update",
+                identity.registry_id
+            ));
+        }
+        authorize_community(&entry, &args.trust_community, project_root)?;
+        Some(entry)
+    } else {
+        None
+    };
+    if public_entry.is_none() && args.registry.is_none() {
+        return Err("Custom registry updates require --registry".into());
+    }
+    let (candidate_location, loaded) = if let Some(entry) = &public_entry {
+        let loaded = public_directory::PublicDirectory::load_manifest(entry)?;
+        (selected_entry_manifest(&loaded)?, loaded)
+    } else {
+        let candidate = args.registry.as_deref().ok_or("Missing update registry")?;
+        let location = resolver::resolve_list(Some(candidate), None, &project_config, &global)?;
+        let loaded = registry::load_registry(&location)?;
+        (location, loaded)
+    };
     let (provider_id, declared_source, resolved_source) =
         candidate_provenance(&loaded, &candidate_location)?;
     if provider_id != existing.provider_id {
@@ -2294,6 +2731,9 @@ fn update(args: UpdateArgs) -> Result<(), String> {
             root_item_id: &root_item_id,
             updating: Some(existing),
             allow_downgrade: args.allow_downgrade,
+            root_public_identity: public_entry.as_ref().map(|entry| entry.public_identity()),
+            trust_community: args.trust_community,
+            project_lock: project_root,
         });
     }
     let candidate_item = loaded.registry.find(&existing.item_id).ok_or_else(|| {
@@ -2437,6 +2877,7 @@ fn update(args: UpdateArgs) -> Result<(), String> {
     provider.declared_source = declared_source;
     provider.resolved_source = resolved_source;
     provider.manifest_sha256 = loaded.manifest_sha256.clone();
+    provider.public_identity = public_entry.as_ref().map(|entry| entry.public_identity());
     let index = next
         .items
         .iter()
@@ -2699,6 +3140,11 @@ fn restore(args: RestoreArgs) -> Result<(), String> {
                         } else {
                             downloader::MAX_FILE_BYTES
                         },
+                        public_identity: before
+                            .providers
+                            .iter()
+                            .find(|provider| provider.provider_id == item.provider_id)
+                            .and_then(|provider| provider.public_identity.clone()),
                     });
                     restore_targets.push(file.target.clone());
                     actions.push(json_file_action(
@@ -2889,6 +3335,9 @@ fn verify_registry(args: RegistryVerifyArgs) -> Result<(), String> {
 }
 fn manage(command: RegistryCommand) -> Result<(), String> {
     match command {
+        RegistryCommand::Discover { registry, json } => {
+            discover_registry(registry.as_deref(), json)
+        }
         RegistryCommand::Verify(args) => verify_registry(args),
         RegistryCommand::Add {
             alias,

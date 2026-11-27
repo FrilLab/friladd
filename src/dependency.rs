@@ -1,6 +1,7 @@
 //! Bounded, provider-neutral Registry v2 dependency graph resolution.
 
 use crate::{
+    public_directory,
     registry::{self, LoadedRegistry},
     registry_v2, resolver,
 };
@@ -42,6 +43,15 @@ impl Graph {
         project_config: &Path,
         global_config: &Path,
     ) -> Result<Self, String> {
+        let public_root = matches!(
+            root_loaded.source,
+            registry::RegistrySource::PublicRemote { .. }
+        );
+        let directory = if public_root {
+            Some(public_directory::PublicDirectory::fetch()?)
+        } else {
+            None
+        };
         Self::resolve_using(
             root_declared,
             root_loaded,
@@ -49,6 +59,7 @@ impl Graph {
             project_config,
             global_config,
             registry::load_registry,
+            directory.as_ref(),
         )
     }
 
@@ -59,6 +70,7 @@ impl Graph {
         project_config: &Path,
         global_config: &Path,
         mut load: F,
+        directory: Option<&public_directory::PublicDirectory>,
     ) -> Result<Self, String>
     where
         F: FnMut(&str) -> Result<LoadedRegistry, String>,
@@ -103,6 +115,7 @@ impl Graph {
             &mut visited,
             &mut edge_count,
             &mut load,
+            directory,
         )?;
 
         Ok(Self {
@@ -144,6 +157,7 @@ fn resolve_node(
     visited: &mut BTreeSet<ItemKey>,
     edge_count: &mut usize,
     load: &mut impl FnMut(&str) -> Result<LoadedRegistry, String>,
+    directory: Option<&public_directory::PublicDirectory>,
 ) -> Result<(), String> {
     if let Some(position) = visiting.iter().position(|entry| entry == key) {
         let mut cycle = visiting[position..]
@@ -227,6 +241,7 @@ fn resolve_node(
                 snapshots,
                 by_identity,
                 load,
+                directory,
             )?
         };
         let dependency_v2 = snapshots[dependency_snapshot]
@@ -280,6 +295,7 @@ fn resolve_node(
             visited,
             edge_count,
             load,
+            directory,
         )?;
         edges.push(resolved_key);
     }
@@ -296,6 +312,7 @@ fn resolve_node(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn select_external_snapshot(
     provider_id: &str,
     manifest_sha256: &str,
@@ -304,6 +321,7 @@ fn select_external_snapshot(
     snapshots: &mut Vec<Snapshot>,
     by_identity: &mut HashMap<String, usize>,
     load: &mut impl FnMut(&str) -> Result<LoadedRegistry, String>,
+    directory: Option<&public_directory::PublicDirectory>,
 ) -> Result<usize, String> {
     let configured = resolver::effective_registries(project_config, global_config)?;
     let mut candidates = BTreeMap::<String, usize>::new();
@@ -336,6 +354,32 @@ fn select_external_snapshot(
             if snapshot.manifest_sha256 == manifest_sha256 {
                 candidates.insert(snapshots[index].identity.clone(), index);
             }
+        }
+    }
+    if candidates.is_empty()
+        && let Some(directory) = directory
+    {
+        let entry = directory.get(provider_id.strip_prefix("v2:").unwrap_or(provider_id));
+        if let Some(entry) = entry.filter(|entry| entry.status == public_directory::Status::Active)
+        {
+            if entry.manifest_sha256 != manifest_sha256 {
+                return Err(format!(
+                    "Stale public provider snapshot for {provider_id}: directory digest does not match required digest {manifest_sha256}"
+                ));
+            }
+            let loaded = public_directory::PublicDirectory::load_manifest(entry)?;
+            let identity = registry::canonical_identity(&entry.registry_url)?;
+            if let Some(index) = by_identity.get(&identity).copied() {
+                return Ok(index);
+            }
+            let index = snapshots.len();
+            snapshots.push(Snapshot {
+                declared: entry.registry_url.clone(),
+                identity: identity.clone(),
+                loaded,
+            });
+            by_identity.insert(identity, index);
+            return Ok(index);
         }
     }
     match candidates.len() {
@@ -464,6 +508,7 @@ mod tests {
                     registry::load_registry(location)
                 }
             },
+            None,
         )
         .unwrap();
         server.join().unwrap();
