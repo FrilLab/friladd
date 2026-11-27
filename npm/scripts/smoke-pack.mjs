@@ -133,13 +133,19 @@ try {
   );
   assert.equal(npmExecHelp.status, 0, `${npmExecHelp.stdout}\n${npmExecHelp.stderr}`);
   assert.match(npmExecHelp.stdout, /Usage: fril <COMMAND>/);
-  const pnpmDlxHelp = run(
-    'pnpm', ['dlx', `--package=${path.resolve(tarball)}`, 'fril', '--help'],
-    consumer,
-    { FRILADD_CONFIG_DIR: configDir },
-  );
-  assert.equal(pnpmDlxHelp.status, 0, `${pnpmDlxHelp.stdout}\n${pnpmDlxHelp.stderr}`);
-  assert.match(pnpmDlxHelp.stdout, /Usage: fril <COMMAND>/);
+  const pnpmTarball = path.join(os.tmpdir(), `f-${process.pid}.tgz`);
+  fs.copyFileSync(path.resolve(tarball), pnpmTarball);
+  try {
+    const pnpmDlxHelp = run(
+      'pnpm', ['dlx', `--package=${pnpmTarball}`, 'fril', '--help'],
+      consumer,
+      { FRILADD_CONFIG_DIR: configDir },
+    );
+    assert.equal(pnpmDlxHelp.status, 0, `${pnpmDlxHelp.stdout}\n${pnpmDlxHelp.stderr}`);
+    assert.match(pnpmDlxHelp.stdout, /Usage: fril <COMMAND>/);
+  } finally {
+    fs.rmSync(pnpmTarball, { force: true });
+  }
 
   const globalPrefix = path.join(tempRoot, 'global-install');
   const globalInstall = run(
