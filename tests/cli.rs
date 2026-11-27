@@ -67,6 +67,28 @@ fn run_with_config(directory: &Path, args: &[&str], config_dir: &Path) -> Output
 }
 
 #[test]
+fn public_discovery_is_read_only_on_success_or_outage() {
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let output = run_with_config(
+        project.path(),
+        &["registry", "discover", "--json"],
+        global.path(),
+    );
+    if output.status.success() {
+        let data: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(data["command"], "registry discover");
+        assert!(data["data"]["registries"].is_array());
+    } else {
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Public directory failed"));
+    }
+    assert!(fs::read_dir(project.path()).unwrap().next().is_none());
+    assert!(fs::read_dir(global.path()).unwrap().next().is_none());
+}
+
+#[test]
 fn public_selection_rejects_custom_registry_override_without_writes() {
     let temp = tempdir().unwrap();
     let output = run_in(
