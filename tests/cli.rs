@@ -3170,7 +3170,10 @@ fn update_reconciles_the_dependency_graph_in_one_dry_run_and_transaction() {
     fs::write(&asset_manifest_path, &asset_manifest).unwrap();
     let ui_manifest_path = ui.path().join("registry.json");
     let component_file = ui.path().join("widget.tsx");
-    let write_component = |version: &str, bytes: &[u8], dependency_manifest: &[u8]| {
+    let write_component = |version: &str,
+                           dependency_version: &str,
+                           bytes: &[u8],
+                           dependency_manifest: &[u8]| {
         fs::write(&component_file, bytes).unwrap();
         fs::write(
             &ui_manifest_path,
@@ -3181,14 +3184,19 @@ fn update_reconciles_the_dependency_graph_in_one_dry_run_and_transaction() {
                 "items":[{
                     "id":"widget", "version":version, "kind":"component",
                     "files":[{"source":"widget.tsx","target":"components/widget.tsx","sha256":format!("{:x}",Sha256::digest(bytes)),"size":bytes.len()}],
-                    "dependencies":[{"providerId":"org.example.assets","itemId":"model","version":if version == "1.0.0" {"1.0.0"} else {"2.0.0"},"manifestSha256":format!("{:x}",Sha256::digest(dependency_manifest))}]
+                    "dependencies":[{"providerId":"org.example.assets","itemId":"model","version":dependency_version,"manifestSha256":format!("{:x}",Sha256::digest(dependency_manifest))}]
                 }]
             }))
             .unwrap(),
         )
         .unwrap();
     };
-    write_component("1.0.0", b"export const Widget = 1;\n", &asset_manifest);
+    write_component(
+        "1.0.0",
+        "1.0.0",
+        b"export const Widget = 1;\n",
+        &asset_manifest,
+    );
     fs::write(
         project.path().join(".friladd.json"),
         serde_json::to_vec(&serde_json::json!({
@@ -3224,7 +3232,12 @@ fn update_reconciles_the_dependency_graph_in_one_dry_run_and_transaction() {
     fs::write(assets.path().join("model.bin"), asset_bytes_v2).unwrap();
     let asset_manifest_v2 = asset_manifest_for("2.0.0", asset_bytes_v2);
     fs::write(&asset_manifest_path, &asset_manifest_v2).unwrap();
-    write_component("2.0.0", b"export const Widget = 2;\n", &asset_manifest_v2);
+    write_component(
+        "2.0.0",
+        "2.0.0",
+        b"export const Widget = 2;\n",
+        &asset_manifest_v2,
+    );
     let dry_run = run_with_config(
         project.path(),
         &[
@@ -3354,6 +3367,67 @@ fn update_reconciles_the_dependency_graph_in_one_dry_run_and_transaction() {
         fs::read(project.path().join("models/model.bin")).unwrap(),
         updated_asset_bytes
     );
+
+    let asset_bytes_v1 = b"original model";
+    fs::write(assets.path().join("model.bin"), asset_bytes_v1).unwrap();
+    let asset_manifest_v1 = asset_manifest_for("1.0.0", asset_bytes_v1);
+    fs::write(&asset_manifest_path, &asset_manifest_v1).unwrap();
+    write_component(
+        "3.0.0",
+        "1.0.0",
+        b"export const Widget = 3;\n",
+        &asset_manifest_v1,
+    );
+    let rejected_downgrade = run_with_config(
+        project.path(),
+        &[
+            "update",
+            "widget",
+            "--registry",
+            "ui",
+            "--version",
+            "3.0.0",
+            "--project",
+            &project_path,
+        ],
+        config,
+    );
+    assert_eq!(
+        rejected_downgrade.status.code(),
+        Some(2),
+        "{rejected_downgrade:?}"
+    );
+    assert!(String::from_utf8_lossy(&rejected_downgrade.stderr).contains("--allow-downgrade"));
+    assert_eq!(fs::read(&lock_path).unwrap(), lock_after_update);
+    assert_eq!(
+        fs::read(project.path().join("models/model.bin")).unwrap(),
+        updated_asset_bytes
+    );
+
+    let confirmed_downgrade = run_with_config(
+        project.path(),
+        &[
+            "update",
+            "widget",
+            "--registry",
+            "ui",
+            "--version",
+            "3.0.0",
+            "--allow-downgrade",
+            "--project",
+            &project_path,
+        ],
+        config,
+    );
+    assert_eq!(
+        confirmed_downgrade.status.code(),
+        Some(0),
+        "{confirmed_downgrade:?}"
+    );
+    assert_eq!(
+        fs::read(project.path().join("models/model.bin")).unwrap(),
+        asset_bytes_v1
+    );
 }
 
 #[test]
@@ -3377,12 +3451,12 @@ fn package_requirement_conflicts_fail_before_any_project_write() {
                     "id":"component","version":"1.0.0","kind":"component",
                     "files":[{"source":"component.bin","target":"component.bin","sha256":format!("{:x}",Sha256::digest(b"component")),"size":9}],
                     "dependencies":[{"providerId":"org.example.packages","itemId":"shared","version":"1.0.0"}],
-                    "packages":[{"name":"react","spec":"^18.2.0","kind":"peer"}]
+                    "packages":[{"name":"react","spec":"18.2.0","kind":"peer"}]
                 },
                 {
                     "id":"shared","version":"1.0.0","kind":"asset",
                     "files":[{"source":"dependency.bin","target":"dependency.bin","sha256":format!("{:x}",Sha256::digest(b"dependency")),"size":10}],
-                    "packages":[{"name":"react","spec":"~19.0.0","kind":"runtime"}]
+                    "packages":[{"name":"react","spec":"18.3.0","kind":"runtime"}]
                 }
             ]
         }))
@@ -3413,6 +3487,68 @@ fn package_requirement_conflicts_fail_before_any_project_write() {
     assert!(!project.path().join("friladd.lock.json").exists());
     assert!(!project.path().join(".friladd").exists());
     assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn graph_install_preserves_distinct_targets_for_a_repeated_source() {
+    use sha2::{Digest, Sha256};
+
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    fs::write(provider.path().join("shared.bin"), b"shared bytes").unwrap();
+    let manifest = provider.path().join("registry.json");
+    fs::write(
+        &manifest,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "id": "org.example.repeated",
+            "name": "repeated",
+            "items": [{
+                "id": "item", "version": "1.0.0", "kind": "asset",
+                "files": [
+                    {"source":"shared.bin", "target":"first.bin", "sha256":format!("{:x}", Sha256::digest(b"shared bytes")), "size":12},
+                    {"source":"shared.bin", "target":"second.bin", "sha256":format!("{:x}", Sha256::digest(b"shared bytes")), "size":12}
+                ]
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let project_path = project.path().display().to_string();
+    let output = run_with_config(
+        project.path(),
+        &[
+            "add",
+            "item",
+            "--registry",
+            &manifest.display().to_string(),
+            "--project",
+            &project_path,
+        ],
+        global.path(),
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        fs::read(project.path().join("first.bin")).unwrap(),
+        b"shared bytes"
+    );
+    assert_eq!(
+        fs::read(project.path().join("second.bin")).unwrap(),
+        b"shared bytes"
+    );
+    let lock = friladd::lockfile::Lock::parse(
+        &fs::read(project.path().join("friladd.lock.json")).unwrap(),
+    )
+    .unwrap();
+    let item = lock
+        .items
+        .iter()
+        .find(|item| item.item_id == "item")
+        .unwrap();
+    assert_eq!(item.files.len(), 2);
+    assert_eq!(item.files[0].declared_target, "first.bin");
+    assert_eq!(item.files[1].declared_target, "second.bin");
 }
 
 #[test]

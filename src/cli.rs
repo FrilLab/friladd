@@ -628,6 +628,7 @@ fn add(args: AddArgs) -> Result<(), String> {
             root_loaded: loaded,
             root_item_id: &root_item_id,
             updating: None,
+            allow_downgrade: false,
         });
     }
     if !args.dry_run {
@@ -913,6 +914,7 @@ struct GraphRequest<'a> {
     root_loaded: registry::LoadedRegistry,
     root_item_id: &'a str,
     updating: Option<lockfile::Item>,
+    allow_downgrade: bool,
 }
 
 fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
@@ -926,6 +928,7 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         root_loaded,
         root_item_id,
         updating,
+        allow_downgrade,
     } = request;
     if !dry_run {
         transaction::recover(project_root)?;
@@ -1015,6 +1018,22 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
                 ));
             }
             if !same_graph_snapshot && updating.is_some() {
+                let installed_version = existing_record
+                    .as_ref()
+                    .and_then(|existing| existing.version.as_deref());
+                if let Some(installed_version) = installed_version
+                    && semver::Version::parse(&item.version)
+                        .map_err(|_| "Invalid candidate semantic version")?
+                        < semver::Version::parse(installed_version)
+                            .map_err(|_| "Invalid installed semantic version")?
+                    && !allow_downgrade
+                {
+                    return Err(format!(
+                        "Dependency {} candidate version {} is older than installed version {installed_version}; pass --allow-downgrade to confirm",
+                        display_graph_item(key),
+                        item.version
+                    ));
+                }
                 let external_dependent = before.lock().items.iter().any(|candidate| {
                     !graph
                         .nodes
@@ -1265,7 +1284,13 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
             let asset = item
                 .files
                 .iter()
-                .find(|asset| asset.source == file.source)
+                .find(|asset| {
+                    asset.source == file.source
+                        && planned.target_root.as_ref().map_or_else(
+                            || asset.target == file.target_display,
+                            |root| format!("{root}/{}", asset.target) == file.target_display,
+                        )
+                })
                 .ok_or("Registry item asset is missing from its installation plan")?;
             if content.sha256 != asset.sha256 || content.size != asset.size {
                 return Err(format!("Integrity mismatch for {}", file.source));
@@ -1517,8 +1542,13 @@ fn package_specs_overlap(specs: &[&str]) -> Result<bool, String> {
             let value = spec.strip_prefix(['^', '~']).unwrap_or(spec);
             let version =
                 semver::Version::parse(value).map_err(|_| "Invalid package requirement version")?;
-            let requirement =
-                semver::VersionReq::parse(spec).map_err(|_| "Invalid package requirement spec")?;
+            let requirement_spec = if spec.starts_with(['^', '~']) {
+                (*spec).to_owned()
+            } else {
+                format!("={spec}")
+            };
+            let requirement = semver::VersionReq::parse(&requirement_spec)
+                .map_err(|_| "Invalid package requirement spec")?;
             Ok((version, requirement))
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -2207,6 +2237,7 @@ fn update(args: UpdateArgs) -> Result<(), String> {
             root_loaded: loaded,
             root_item_id: &root_item_id,
             updating: Some(existing),
+            allow_downgrade: args.allow_downgrade,
         });
     }
     let candidate_item = loaded.registry.find(&existing.item_id).ok_or_else(|| {
