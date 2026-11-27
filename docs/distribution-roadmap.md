@@ -2,9 +2,9 @@
 
 FrilAdd is a provider-independent developer-side file installer, not a runtime renderer or asset authoring tool. Keep Registry v1 working for existing providers. Providers publish manifests and files that follow the documented contracts; FrilAdd contains no provider-specific implementation.
 
-## v0.2.0 qualification status (candidate; not published)
+## v0.2.0 qualification status
 
-The implementation and FrilAdd-owned release gates are complete in the release candidate branch. The release remains blocked on external provider qualification listed below. Do not treat this candidate report as a public release or as evidence that unavailable provider resources passed.
+FrilAdd v0.2.0 is accepted on the strength of FrilAdd-owned security, compatibility, test, package, and cross-platform release checks. Provider-specific integration status below is reported separately and does not gate this provider-agnostic CLI release. Unavailable provider resources are not treated as passed tests; remaining work is tracked in issue #33.
 
 ### Verified FrilAdd behavior
 
@@ -17,8 +17,8 @@ The implementation and FrilAdd-owned release gates are complete in the release c
 | Provider / consumer | Evidence | Status |
 | --- | --- | --- |
 | FrilCraft | Pinned provider commit `9fe26c6b9ccba34df027793d5e2e5f5ed45c69d3`; the published Envelope Reveal component and license were installed byte-for-byte into an isolated React consumer. Dry-run/no-write, repeat add, lock stability, behavior test, typecheck, and production build passed. The provider's own pinned-commit HTTPS workflow also passed. FrilStudio consumer typecheck/build and focused component interaction test passed after adding the provider-documented `cn` dependency in the isolated checkout. | Qualified for the available v1 component. FrilCraft currently has no reviewed binary asset for the cross-provider asset case. |
-| FrilAssets | Repository inspected. No released registry or reviewed, licensed asset is available; open proposals are not accepted releases. | **External release blocker:** publish and review a real GLB plus required textures/license/provenance, then verify bytes and render it in a consumer. |
-| FrilRemotion | Pinned scaffold `a4b5b2992c81f01f36206cdba0d11a7ca65fc458`; provider registry validation, typecheck, and provider SmokeTest render passed. FrilAdd installed its published FadeIn primitive and license byte-for-byte; a clean Remotion consumer typechecked and rendered a 60-frame H.264 clip using the installed primitive. Status, exact-source restore, and remove were checked. | **External release blocker:** the provider does not publish a composition or dependency metadata. Primitive rendering does not satisfy the composition qualification. |
+| FrilAssets | Repository inspected. No released registry or reviewed, licensed asset was available during qualification. | **Not qualified:** a reviewed real GLB, license/provenance, byte verification, and consumer render remain unperformed. Follow-up #33. |
+| FrilRemotion | Pinned scaffold `a4b5b2992c81f01f36206cdba0d11a7ca65fc458`; provider registry validation, typecheck, and provider SmokeTest render passed. FrilAdd installed its published FadeIn primitive and license byte-for-byte; a clean Remotion consumer typechecked and rendered a 60-frame H.264 clip using the installed primitive. Status, exact-source restore, and remove were checked. | **Partially qualified:** a provider-published composition and dependency metadata, plus composition install/render, remain unperformed. Primitive rendering does not satisfy that test. Follow-up #33. |
 | FrilStudio | Private consumer at `5acfa7cf742b9850d13ec7ce8d9ff17dbf9ab40e`; installed FrilCraft component was integrated and interaction-tested in an isolated checkout. Typecheck and production build passed with Node 24 and the provider-documented `cn` dependency. | Qualified for the available FrilCraft component. |
 
 FrilCraft's source repository is accessible locally, but the developer-network FrilAdd HTTPS request to raw.githubusercontent.com timed out during this run. The pinned provider CI HTTPS integration has passed, and local integration used the byte-identical manifest/source checkout at the pinned commit. Record this as an environment limitation, not as local HTTPS qualification evidence.
@@ -35,4 +35,4 @@ FrilAssets owns source assets, licenses, and optimized exports. FrilCraft owns c
 
 ## Completion definition
 
-A clean consumer can select and install versioned components and binary assets from independent providers, verify them, build/render without cloning provider repositories, and repeat the process reliably in CI. Locally changed files are never overwritten silently. The v0.2.0 release cannot meet this definition until the FrilAssets and FrilRemotion provider blockers above are resolved and real integrations pass. Do not claim integration based on synthetic fixtures or a primitive when the required published resource is absent.
+A clean consumer can select and install versioned components and binary assets from independent providers, verify them, build/render without cloning provider repositories, and repeat the process reliably in CI. Locally changed files are never overwritten silently. FrilAdd v0.2.0 establishes the provider-neutral distribution CLI contract; qualification of every provider and resource type is ongoing follow-up work. Do not claim integration based on synthetic fixtures or a primitive when the required published resource is absent.

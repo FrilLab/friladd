@@ -4,7 +4,7 @@
 
 ## Install
 
-The v0.2.0 candidate is not published. After its release is approved, install it globally with `npm install --global friladd@0.2.0`, or run `npx --yes friladd@0.2.0 --help`. To upgrade an existing global install, run the same global install command and check `friladd --version`. See [the v0.2.0 release checklist](docs/releases/v0.2.0.md) for the release gate and supported packaged targets.
+FrilAdd v0.2.0 is the stable provider-independent CLI release. Install it globally with `npm install --global friladd@0.2.0`, or run `npx --yes friladd@0.2.0 --help`. To upgrade an existing global install, run the same global install command and check `friladd --version`. See [the v0.2.0 release notes](docs/releases/v0.2.0.md) for supported packaged targets and known limitations.
 
 ## What it does
 
