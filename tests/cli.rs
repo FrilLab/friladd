@@ -19,7 +19,7 @@ fn native_binary_aliases_have_their_own_names_and_the_same_error_contract() {
         assert_eq!(version.status.code(), Some(0));
         assert_eq!(
             String::from_utf8(version.stdout).unwrap().trim(),
-            format!("{name} 0.2.0")
+            format!("{name} {}", env!("CARGO_PKG_VERSION"))
         );
         assert!(version.stderr.is_empty());
 

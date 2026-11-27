@@ -6,6 +6,11 @@
 - Create the separately maintained public `FrilLab/frilregistry` static directory with local-only validation, submission/review/suspension/rollback policy, and protected `main`. Its canonical endpoint is live and publicly reachable but remains empty pending independent review of the suspended FrilCraft candidate.
 - Add a separate strict public transport and bounded directory parser for #40: HTTPS allowlist, pinned checked DNS answers, disabled proxies/redirects, immutable repository path matching, and exact manifest digest verification.
 
+## 0.2.1 candidate (unpublished; NO-GO)
+
+- Prepare the compatible patch version containing curated public discovery and installation. Do not publish until the live official-provider and production qualification gates in issue #43 pass and a maintainer authorizes publication of this exact version.
+- Record current directory operations and outage, incident, admission, and maintenance procedures in [the public directory runbook](docs/operations/public-directory.md). The catalog is empty, so this candidate has no real provider installation qualification.
+
 ## 0.2.0
 
 - Expose `fril` as the primary Cargo, native release, and npm command while preserving the `friladd` executable alias and version output. Both aliases share the same CLI and project state; the npm tarball continues to contain one platform binary.
