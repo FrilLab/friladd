@@ -230,6 +230,10 @@ npx friladd add envelope-reveal --project ./my-app
 
 The URL above is a placeholder. Each manifest can expose selected source files; FrilAdd does not require developers to clone a provider repository. FrilAdd does not install declared npm dependencies; component authors should document those requirements.
 
+## Community
+
+Using FrilAdd in your project? See our [community badges and brand assets](docs/branding.md).
+
 ## Development and tests
 
 For contributor setup, validation commands, and architecture notes, see [CONTRIBUTING.md](CONTRIBUTING.md).
