@@ -1,11 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (release candidate; unpublished)
 
 - Resolve Registry v2 dependency DAGs across explicitly registered providers and install missing graph items with ownership edges in one transaction.
 - Report aggregated package requirements and advisory npm/pnpm/yarn commands without executing package managers or modifying project manifests.
 - Add read-only `doctor` diagnostics with offline-by-default checks for configuration, lockfiles, transaction recovery, managed-file safety/drift, and package manager lockfiles; optional bounded registry manifest validation is available with `--online`.
 - Add versioned JSON output to `registry list` and `registry verify`, with registry source redaction and verification manifest digests.
+- Qualify FrilCraft's published component in isolated React and FrilStudio consumers. FrilAssets reviewed-asset and FrilRemotion composition qualification remain external release blockers; see `docs/distribution-roadmap.md`.
 - Add deterministic `list`, `search`, and `info` commands with provider-neutral Registry v1/v2 metadata and versioned JSON output.
 - Add explicit configured-registry search/list selection with project-over-global alias shadowing and fail-all behavior for unavailable registries.
 - Install v1 and dependency-free v2 items as managed resources, recording ownership with the file changes through the recoverable transaction engine.

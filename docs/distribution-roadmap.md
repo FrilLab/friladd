@@ -1,40 +1,38 @@
 # Distribution roadmap
 
-FrilAdd is a provider-independent developer-side file installer, not a runtime renderer or asset authoring tool. Keep registry v1 working for existing providers. Do not hard-code FrilLab URLs or require consumers to install every provider.
+FrilAdd is a provider-independent developer-side file installer, not a runtime renderer or asset authoring tool. Keep Registry v1 working for existing providers. Providers publish manifests and files that follow the documented contracts; FrilAdd contains no provider-specific implementation.
 
-## v0.1.2 baseline (historical)
+## v0.2.0 qualification status (candidate; not published)
 
-- FrilCraft publishes a v1 manifest for Envelope Reveal, with a documented React/Tailwind setup.
-- FrilAssets is an asset production repository; reviewed asset publication and an install registry are not yet available.
-- FrilStudio is a consumer. FrilRemotion is an intended producer/consumer; its current repository implementation was not accessible during this review.
-- v1 supports exact binary bytes, with a 10 MiB per-file limit. No installed-item records, package or registry dependencies, update/uninstall or target mapping are implemented.
+The implementation and FrilAdd-owned release gates are complete in the release candidate branch. The release remains blocked on external provider qualification listed below. Do not treat this candidate report as a public release or as evidence that unavailable provider resources passed.
 
-## v0.2.0 implementation status
+### Verified FrilAdd behavior
 
-- Registry v1 keeps its 10 MiB file limit. Registry v2 streams up to 100 MiB per file and 512 MiB per operation into verified temporary staging, with exact size and SHA-256 checks before the shared transaction engine writes project files.
-- Managed ownership, status, update/remove/restore and target mapping use the shared lock and recoverable transaction contract. Dependency execution and real-provider qualification remain tracked in Epic #9.
+- Registry v1 retains its 10 MiB per-file cap; Registry v2 streams files up to 100 MiB and operations up to 512 MiB into verified temporary staging. Hash, size, and byte limits are checked before project destinations are committed.
+- Managed ownership, status, update/remove/restore and portable target mapping use the shared lock and recoverable transaction contract. Dependency DAGs resolve across explicitly registered providers and install atomically with ownership edges. Package requirements are reported as advisory commands and are never executed.
+- The CI workflow tests formatting, clippy, unit/CLI/Registry tests, Rust 1.88 MSRV, native build/tests, packed npm installation, and platform smoke tests on Linux x64, macOS ARM64/x64, and Windows x64.
 
-## Phase 1: real provider release gate
+### Provider qualification matrix
 
-- [ ] Provider verification of every declared file using the same validation and hash logic as installation.
-- [ ] CI tests local and HTTPS installation, dry run, tampered/missing files, binary byte identity, and existing-file protection.
-- [ ] Build and test the packed npm CLI on all supported platforms; publish only after successful CI and release review.
-- [ ] Publish one reviewed FrilAssets item containing a GLB and any required textures/license, with a provider-generated manifest. Install it into an empty consumer using a pinned registry URL, then render it in a real consumer.
-- [ ] Install a real FrilCraft component from a pinned manifest, then typecheck and build a clean React consumer with documented dependencies.
-- [ ] Install a real FrilRemotion composition and render a short clip once the provider is available.
+| Provider / consumer | Evidence | Status |
+| --- | --- | --- |
+| FrilCraft | Pinned provider commit `9fe26c6b9ccba34df027793d5e2e5f5ed45c69d3`; the published Envelope Reveal component and license were installed byte-for-byte into an isolated React consumer. Dry-run/no-write, repeat add, lock stability, behavior test, typecheck, and production build passed. The provider's own pinned-commit HTTPS workflow also passed. FrilStudio consumer typecheck/build and focused component interaction test passed after adding the provider-documented `cn` dependency in the isolated checkout. | Qualified for the available v1 component. FrilCraft currently has no reviewed binary asset for the cross-provider asset case. |
+| FrilAssets | Repository inspected. No released registry or reviewed, licensed asset is available; open proposals are not accepted releases. | **External release blocker:** publish and review a real GLB plus required textures/license/provenance, then verify bytes and render it in a consumer. |
+| FrilRemotion | Pinned scaffold `a4b5b2992c81f01f36206cdba0d11a7ca65fc458`; provider registry validation, typecheck, and provider SmokeTest render passed. FrilAdd installed its published FadeIn primitive and license byte-for-byte; a clean Remotion consumer typechecked and rendered a 60-frame H.264 clip using the installed primitive. Status, exact-source restore, and remove were checked. | **External release blocker:** the provider does not publish a composition or dependency metadata. Primitive rendering does not satisfy the composition qualification. |
+| FrilStudio | Private consumer at `5acfa7cf742b9850d13ec7ce8d9ff17dbf9ab40e`; installed FrilCraft component was integrated and interaction-tested in an isolated checkout. Typecheck and production build passed with Node 24 and the provider-documented `cn` dependency. | Qualified for the available FrilCraft component. |
 
-## Phase 2: safe resource lifecycle (implemented in v0.2.0)
+FrilCraft's source repository is accessible locally, but the developer-network FrilAdd HTTPS request to raw.githubusercontent.com timed out during this run. The pinned provider CI HTTPS integration has passed, and local integration used the byte-identical manifest/source checkout at the pinned commit. Record this as an environment limitation, not as local HTTPS qualification evidence.
 
-The v1 project lock records provider identity, resolved source, item version or manifest digest, installed paths and hashes. It preserves unversioned v1 provider identity without inventing versions, tracks ownership outside reserved metadata paths, and supports installed/status, exact-source restore, explicit update and remove through recoverable transactions. Lifecycle operations preserve local edits and unrelated files and expose dry-run and machine-readable output. Prefer pinned immutable release or commit URLs over mutable branch URLs.
+## Safe resource lifecycle
 
-## Phase 3: assets and composition dependencies
+The v1 project lock records provider identity, resolved source, item version or manifest digest, dependency edges, installed paths, and hashes. It preserves unversioned v1 provider identity without inventing versions, tracks ownership outside reserved metadata paths, and supports offline installed/status inspection, exact-source restore, explicit update, and remove through recoverable transactions. Lifecycle operations preserve local edits and unrelated files and expose dry-run and machine-readable output. Prefer pinned immutable release or commit URLs over mutable branch URLs.
 
-Registry v2 defines item type, license, version, file size, package requirements and explicit registry dependencies. Dependency execution and conflict resolution remain tracked work. Package installs stay explicit and opt-in; registry-provided scripts are never executed. Target roots are configurable without permitting traversal, symlinks or reserved paths. Large model, HDR environment and media transport uses bounded streaming, verified staging, per-file and aggregate limits and transactional rollback. Registry v1 retains its original per-file cap.
+Registry v2 defines item type, license, version, file size, package requirements, explicit registry dependencies, and portable target mapping. Dependency execution is limited to safe acquisition and installation of declared resources. Package installs remain explicit and opt-in; registry-provided scripts are never executed. Targets cannot traverse, follow symlinks, or enter reserved paths. Large model, HDR environment, and media transport uses bounded streaming and verified staging with per-file and aggregate limits. Registry v1 retains its original per-file cap.
 
-## Boundaries
+## Provider and consumer boundaries
 
-FrilAssets owns source assets, licenses and optimized exports. FrilCraft owns components, rendering adapters and interactions. FrilRemotion owns compositions and timelines. FrilStudio owns editing, publication and end-user UX. FrilAdd owns registry resolution, verified acquisition, installation planning and developer tooling. It is not invoked on wedding guests' browsers or video-rendering frames. Runtime asset hosting and public application deployment remain the consumer's responsibility.
+FrilAssets owns source assets, licenses, and optimized exports. FrilCraft owns components, rendering adapters, and interactions. FrilRemotion owns compositions and timelines. FrilStudio owns editing, publication, and end-user UX. FrilAdd owns registry resolution, verified acquisition, installation planning, and developer tooling. It is not invoked on wedding guests' browsers or video-rendering frames. Runtime asset hosting and public application deployment remain the consumer's responsibility.
 
 ## Completion definition
 
-A clean consumer can select and install a versioned component and binary asset from independent providers, verify them, build/render without cloning those repositories, and repeat the process reliably in CI. Locally changed files are never overwritten silently. Document the exact commands, dependency setup, supported platforms and known limitations. Do not claim an integration is finished based on a synthetic fixture alone.
+A clean consumer can select and install versioned components and binary assets from independent providers, verify them, build/render without cloning provider repositories, and repeat the process reliably in CI. Locally changed files are never overwritten silently. The v0.2.0 release cannot meet this definition until the FrilAssets and FrilRemotion provider blockers above are resolved and real integrations pass. Do not claim integration based on synthetic fixtures or a primitive when the required published resource is absent.

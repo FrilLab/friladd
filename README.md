@@ -2,6 +2,10 @@
 
 **Install only the source files you select.** FrilAdd is a standalone Rust CLI that reads a small, versioned JSON registry and installs the declared files for one item into a project. It does not depend on FrilCraft and can be used with any registry that follows the FrilAdd manifest format.
 
+## Install
+
+The v0.2.0 candidate is not published. After its release is approved, install it globally with `npm install --global friladd@0.2.0`, or run `npx --yes friladd@0.2.0 --help`. To upgrade an existing global install, run the same global install command and check `friladd --version`. See [the v0.2.0 release checklist](docs/releases/v0.2.0.md) for the release gate and supported packaged targets.
+
 ## What it does
 
 - Lists items in a selected local or HTTPS registry, including registered aliases.
