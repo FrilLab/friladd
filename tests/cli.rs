@@ -441,6 +441,383 @@ fn all_registry_catalog_is_bounded_before_loading_manifests() {
 }
 
 #[test]
+fn doctor_is_offline_read_only_and_reports_warnings_without_failing() {
+    use std::net::TcpListener;
+
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let source = format!("https://{}/registry.json", listener.local_addr().unwrap());
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "defaultRegistry": "local",
+            "registries": {"local": {"source": source}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        project.path().join("package.json"),
+        br#"{"name":"consumer"}"#,
+    )
+    .unwrap();
+    let project_path = project.path().display().to_string();
+    let before_config = fs::read(project.path().join(".friladd.json")).unwrap();
+    let output = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--json"],
+        global.path(),
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schemaVersion"], 1);
+    assert_eq!(report["command"], "doctor");
+    assert_eq!(report["data"]["defaultRegistry"], "local");
+    assert_eq!(report["data"]["summary"]["warn"], 1);
+    assert_eq!(report["data"]["summary"]["fail"], 0);
+    assert_eq!(
+        report["data"]["packageManagers"].as_array().unwrap().len(),
+        0
+    );
+    assert!(
+        report["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check["code"] == "registry.online" && check["state"] == "skip")
+    );
+    assert!(
+        listener.accept().is_err(),
+        "offline doctor contacted the remote registry"
+    );
+    assert_eq!(
+        fs::read(project.path().join(".friladd.json")).unwrap(),
+        before_config
+    );
+    assert!(!project.path().join("friladd.lock.json").exists());
+    assert!(!project.path().join(".friladd").exists());
+
+    let online_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let online_source = format!(
+        "https://{}/registry.json",
+        online_listener.local_addr().unwrap()
+    );
+    let server = std::thread::spawn(move || {
+        if let Ok((stream, _)) = online_listener.accept() {
+            drop(stream);
+        }
+    });
+    let online_config = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "defaultRegistry": "local",
+        "registries": {"local": {"source": online_source}}
+    }))
+    .unwrap();
+    fs::write(project.path().join(".friladd.json"), &online_config).unwrap();
+    let online = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--online", "--json"],
+        global.path(),
+    );
+    assert_eq!(online.status.code(), Some(2));
+    assert!(!online.stderr.is_empty());
+    let online_report: serde_json::Value = serde_json::from_slice(&online.stdout).unwrap();
+    assert_eq!(
+        online_report["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "registry.online.local")
+            .unwrap()["state"],
+        "fail"
+    );
+    server.join().unwrap();
+    assert_eq!(
+        fs::read(project.path().join(".friladd.json")).unwrap(),
+        online_config
+    );
+    assert!(!project.path().join(".friladd").exists());
+}
+
+#[test]
+fn doctor_reports_corrupt_state_drift_and_interrupted_transactions_without_repairing() {
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    write_lock(project.path(), &[("assets/managed.bin", b"expected")]);
+    let target = project.path().join("assets/managed.bin");
+    fs::write(&target, b"local edit").unwrap();
+    let project_path = project.path().display().to_string();
+    let lock_bytes = fs::read(project.path().join("friladd.lock.json")).unwrap();
+    let edited_bytes = fs::read(&target).unwrap();
+    let output = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--json"],
+        global.path(),
+    );
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["managed"]["fileStates"]["modified"], 1);
+    assert_eq!(report["data"]["summary"]["warn"], 2); // drift and missing default
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        lock_bytes
+    );
+    assert_eq!(fs::read(&target).unwrap(), edited_bytes);
+
+    fs::create_dir_all(project.path().join(".friladd/transaction")).unwrap();
+    let transaction = project.path().join(".friladd/transaction");
+    fs::write(transaction.join("sentinel"), b"preserve me").unwrap();
+    let pending = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--json"],
+        global.path(),
+    );
+    assert_eq!(pending.status.code(), Some(2));
+    let pending_report: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
+    assert_eq!(pending_report["data"]["transactionPending"], true);
+    assert_eq!(
+        pending_report["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "transaction.recovery")
+            .unwrap()["state"],
+        "fail"
+    );
+    assert_eq!(
+        fs::read(transaction.join("sentinel")).unwrap(),
+        b"preserve me"
+    );
+    assert_eq!(fs::read(&target).unwrap(), edited_bytes);
+
+    fs::remove_dir_all(project.path().join(".friladd")).unwrap();
+    fs::write(project.path().join("friladd.lock.json"), b"{").unwrap();
+    let corrupt = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--json"],
+        global.path(),
+    );
+    assert_eq!(corrupt.status.code(), Some(2));
+    let corrupt_report: serde_json::Value = serde_json::from_slice(&corrupt.stdout).unwrap();
+    assert_eq!(
+        corrupt_report["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "lock.schema")
+            .unwrap()["state"],
+        "fail"
+    );
+    assert_eq!(
+        fs::read(project.path().join("friladd.lock.json")).unwrap(),
+        b"{"
+    );
+
+    fs::write(
+        project.path().join("friladd.lock.json"),
+        b"{\"schemaVersion\":1,\"providers\":[],\"items\":[]}",
+    )
+    .unwrap();
+    fs::write(project.path().join(".friladd.json"), b"{").unwrap();
+    let invalid_config = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--json"],
+        global.path(),
+    );
+    assert_eq!(invalid_config.status.code(), Some(2));
+    let config_report: serde_json::Value = serde_json::from_slice(&invalid_config.stdout).unwrap();
+    assert_eq!(
+        config_report["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "config.project")
+            .unwrap()["state"],
+        "fail"
+    );
+    assert_eq!(
+        fs::read(project.path().join(".friladd.json")).unwrap(),
+        b"{"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_reports_unsafe_owned_symlinks_and_symlink_project_roots() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let outside = tempdir().unwrap();
+    write_lock(project.path(), &[("assets/managed.bin", b"expected")]);
+    let target = project.path().join("assets/managed.bin");
+    fs::remove_file(&target).unwrap();
+    let secret = outside.path().join("secret.bin");
+    fs::write(&secret, b"private").unwrap();
+    symlink(&secret, &target).unwrap();
+    let project_path = project.path().display().to_string();
+    let output = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--json"],
+        global.path(),
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["data"]["managed"]["fileStates"]["unsafe"], 1);
+    assert_eq!(fs::read_link(&target).unwrap(), secret);
+    assert_eq!(fs::read(&secret).unwrap(), b"private");
+
+    let root = tempdir().unwrap();
+    let alias = root.path().join("project-link");
+    symlink(project.path(), &alias).unwrap();
+    let alias_path = alias.display().to_string();
+    let symlink_root = run_with_config(
+        root.path(),
+        &["doctor", "--project", &alias_path, "--json"],
+        global.path(),
+    );
+    assert_eq!(symlink_root.status.code(), Some(2));
+    let root_report: serde_json::Value = serde_json::from_slice(&symlink_root.stdout).unwrap();
+    assert_eq!(
+        root_report["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "project.path")
+            .unwrap()["state"],
+        "fail"
+    );
+    assert_eq!(fs::read_link(&alias).unwrap(), project.path());
+}
+
+#[test]
+fn registry_commands_emit_versioned_json_and_verify_without_project_writes() {
+    let project = tempdir().unwrap();
+    let global = tempdir().unwrap();
+    let registry_path = repo_path("registry/registry.json");
+    fs::write(
+        project.path().join(".friladd.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "registries": {
+                "local": {"source": registry_path},
+                "private": {"source": "https://user:secret@example.test/registry.json?token=hidden"}
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let project_path = project.path().display().to_string();
+    let before_config = fs::read(project.path().join(".friladd.json")).unwrap();
+    let listing = run_with_config(
+        project.path(),
+        &["registry", "list", "--project", &project_path, "--json"],
+        global.path(),
+    );
+    assert!(listing.status.success(), "{listing:?}");
+    let listing_json: serde_json::Value = serde_json::from_slice(&listing.stdout).unwrap();
+    assert_eq!(listing_json["command"], "registry list");
+    assert_eq!(listing_json["data"]["registries"][0]["alias"], "local");
+    assert_eq!(
+        listing_json["data"]["registries"][1]["source"],
+        "https://example.test/[redacted]"
+    );
+    assert!(!String::from_utf8_lossy(&listing.stdout).contains("secret"));
+    assert!(!String::from_utf8_lossy(&listing.stdout).contains("hidden"));
+    let verify = run_with_config(
+        project.path(),
+        &[
+            "registry",
+            "verify",
+            "local",
+            "--project",
+            &project_path,
+            "--json",
+        ],
+        global.path(),
+    );
+    assert_eq!(verify.status.code(), Some(0), "{verify:?}");
+    let verify_json: serde_json::Value = serde_json::from_slice(&verify.stdout).unwrap();
+    assert_eq!(verify_json["command"], "registry verify");
+    assert!(
+        verify_json["data"]["manifestSha256"]
+            .as_str()
+            .unwrap()
+            .len()
+            == 64
+    );
+    assert!(verify_json["data"]["fileCount"].as_u64().unwrap() > 0);
+    assert_eq!(
+        fs::read(project.path().join(".friladd.json")).unwrap(),
+        before_config
+    );
+    let metadata_only = project.path().join("metadata-only/registry.json");
+    fs::create_dir_all(metadata_only.parent().unwrap()).unwrap();
+    fs::write(
+        &metadata_only,
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "name": "metadata-only",
+            "items": [{"name":"example","description":"Manifest only","files":[{"source":"missing.bin","target":"src/missing.bin","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let online_config = serde_json::to_vec(&serde_json::json!({
+        "schemaVersion": 1,
+        "defaultRegistry": "local",
+        "registries": {"local": {"source": metadata_only}}
+    }))
+    .unwrap();
+    fs::write(project.path().join(".friladd.json"), &online_config).unwrap();
+    let online_doctor = run_with_config(
+        project.path(),
+        &["doctor", "--project", &project_path, "--online", "--json"],
+        global.path(),
+    );
+    assert_eq!(online_doctor.status.code(), Some(0), "{online_doctor:?}");
+    let doctor_json: serde_json::Value = serde_json::from_slice(&online_doctor.stdout).unwrap();
+    assert_eq!(
+        doctor_json["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["code"] == "registry.online.local")
+            .unwrap()["state"],
+        "ok"
+    );
+    assert_eq!(
+        fs::read(project.path().join(".friladd.json")).unwrap(),
+        online_config
+    );
+    assert!(!project.path().join("friladd.lock.json").exists());
+    assert!(!project.path().join(".friladd").exists());
+
+    fs::write(
+        global.path().join(".friladd.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 1,
+            "registries": {"global": {"source": "https://example.test/registry.json"}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let global_listing = run_with_config(
+        project.path(),
+        &["registry", "list", "--global", "--json"],
+        global.path(),
+    );
+    assert!(global_listing.status.success(), "{global_listing:?}");
+    let global_json: serde_json::Value = serde_json::from_slice(&global_listing.stdout).unwrap();
+    assert_eq!(global_json["data"]["registries"][0]["alias"], "global");
+    assert_eq!(global_json["data"]["registries"][0]["scope"], "global");
+}
+
+#[test]
 fn installed_and_status_are_offline_read_only_and_report_drift() {
     let project = tempdir().unwrap();
     write_lock(project.path(), &[("assets/model.bin", b"\0binary\xff")]);

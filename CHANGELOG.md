@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Add read-only `doctor` diagnostics with offline-by-default checks for configuration, lockfiles, transaction recovery, managed-file safety/drift, and package manager lockfiles; optional bounded registry manifest validation is available with `--online`.
+- Add versioned JSON output to `registry list` and `registry verify`, with registry source redaction and verification manifest digests.
 - Add deterministic `list`, `search`, and `info` commands with provider-neutral Registry v1/v2 metadata and versioned JSON output.
 - Add explicit configured-registry search/list selection with project-over-global alias shadowing and fail-all behavior for unavailable registries.
 - Install v1 and dependency-free v2 items as managed resources, recording ownership with the file changes through the recoverable transaction engine.
