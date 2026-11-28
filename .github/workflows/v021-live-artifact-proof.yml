@@ -1,0 +1,42 @@
+name: v0.2.1 production artifact proof
+on:
+  push:
+    branches: [codex/v021-live-artifact-proof]
+permissions:
+  actions: read
+  contents: read
+jobs:
+  production-smoke:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          github-token: ${{ github.token }}
+          run-id: 46126331193
+          name: friladd-npm-tarball
+          path: ${{ runner.temp }}/candidate
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "${RUNNER_TEMP}/live-proof/legacy-release"
+          cd "${RUNNER_TEMP}/live-proof/legacy-release"
+          gh release download v0.2.0 -R FrilLab/friladd             -p friladd-x86_64-unknown-linux-gnu -p SHA256SUMS
+          grep '  friladd-x86_64-unknown-linux-gnu$' SHA256SUMS | sha256sum -c
+          chmod u+x friladd-x86_64-unknown-linux-gnu
+      - env:
+          FRILADD_QUALIFICATION_ROOT: ${{ runner.temp }}/live-proof
+        run: |
+          candidate="${RUNNER_TEMP}/candidate/friladd-0.2.1.tgz"
+          printf '%s  %s\n' '9b46a3affd8ad607334dcf53602237c0159d78c832a2ecb9ff1c397bdc3ef82b' "$candidate" | sha256sum -c
+          cp -R .github/live-proof/{browser-tool,consumer-template} "$FRILADD_QUALIFICATION_ROOT"
+          touch "$FRILADD_QUALIFICATION_ROOT"/{user,global}.npmrc
+          export FRILADD_BROWSER="$(command -v google-chrome)"
+          (cd "$FRILADD_QUALIFICATION_ROOT/browser-tool" && npm install --ignore-scripts --no-audit --no-fund playwright-core@1.65.1)
+          bash .github/live-proof/check-packed.sh "$candidate"
