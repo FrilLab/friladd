@@ -20,7 +20,7 @@ fril() {
     else
       result=$?
     fi
-    if [ "$attempt" -lt 3 ] && rg -q 'Public registry request failed|Cannot resolve approved public registry host' "$RUN/command.stderr"; then
+    if [ "$attempt" -lt 3 ] && grep -Eq 'Public registry request failed|Cannot resolve approved public registry host' "$RUN/command.stderr"; then
       printf 'Network retry %s for fril %s\n' "$attempt" "$*" >&2
       cat "$RUN/command.stderr" >&2
     else
@@ -62,13 +62,15 @@ diff -u - "$RUN/copy-tree.txt" <<'TREE'
 ./src/components/envelope-reveal/LICENSE
 ./src/components/envelope-reveal/index.ts
 TREE
-rg -q '^MIT License' src/components/envelope-reveal/LICENSE
+grep -Eq '^MIT License' src/components/envelope-reveal/LICENSE
 fril installed --json | jq -e '.data.items == []' >/dev/null
 set +e
 fril add frilcraft/envelope-reveal --json > "$RUN/repeat.stdout" 2> "$RUN/repeat.stderr"
 REPEAT=$?
 set -e
-test "$REPEAT" -eq 2 && test ! -s "$RUN/repeat.stdout" && rg -q 'already exist and are unmanaged' "$RUN/repeat.stderr"
+test "$REPEAT" -eq 2
+test ! -s "$RUN/repeat.stdout"
+grep -Eq 'already exist and are unmanaged' "$RUN/repeat.stderr"
 shasum -a 256 -c "$RUN/resource.sha256"
 printf 'Copy file tree and repeated no-clobber add passed\n'
 
@@ -80,7 +82,9 @@ printf '%s\n' 'node_modules/' > .gitignore
 shasum -a 256 package.json package-lock.json .gitignore > "$RUN/seeded.sha256"
 fril add frilcraft/envelope-reveal
 shasum -a 256 -c "$RUN/seeded.sha256"
-test ! -e .friladd && test ! -e .friladd.json && test ! -e friladd.lock.json
+test ! -e .friladd
+test ! -e .friladd.json
+test ! -e friladd.lock.json
 
 cd "$RUN/managed"
 fril add frilcraft/envelope-reveal --managed --dry-run
@@ -103,7 +107,9 @@ set +e
 fril update envelope-reveal --json > "$RUN/edited.stdout" 2> "$RUN/edited.stderr"
 EDITED=$?
 set -e
-test "$EDITED" -eq 2 && test ! -s "$RUN/edited.stdout" && rg -q 'modified' "$RUN/edited.stderr"
+test "$EDITED" -eq 2
+test ! -s "$RUN/edited.stdout"
+grep -Eq 'modified' "$RUN/edited.stderr"
 test "$(cat src/components/envelope-reveal/index.ts)" = 'consumer edit'
 cmp friladd.lock.json "$RUN/managed-lock-before.json"
 rm src/components/envelope-reveal/index.ts
