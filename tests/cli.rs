@@ -1026,7 +1026,13 @@ fn qualified_status_uses_registry_alias_even_when_a_same_named_path_exists() {
 
     // The repository working directory has a `registry/` directory. A qualified
     // alias must still be resolved from project configuration.
-    let added = run(&["add", "registry/sample", "--project", &project_path]);
+    let added = run(&[
+        "add",
+        "registry/sample",
+        "--managed",
+        "--project",
+        &project_path,
+    ]);
     assert_eq!(added.status.code(), Some(0), "{added:?}");
     let status = run(&[
         "status",
@@ -1055,7 +1061,7 @@ fn qualified_status_keeps_local_lock_ownership_when_registry_is_removed() {
     let manifest = manifest.display().to_string();
     let registered = run_in(project.path(), &["registry", "add", "fixture", &manifest]);
     assert_eq!(registered.status.code(), Some(0), "{registered:?}");
-    let added = run_in(project.path(), &["add", "fixture/sample"]);
+    let added = run_in(project.path(), &["add", "fixture/sample", "--managed"]);
     assert_eq!(added.status.code(), Some(0), "{added:?}");
     fs::remove_file(&manifest).unwrap();
 
@@ -1303,6 +1309,110 @@ fn dry_run_creates_no_project_files_and_install_is_byte_identical() {
         fs::read(project.path().join("package.json")).unwrap(),
         fs::read(repo_path("fixtures/consumer-project/package.json")).unwrap()
     );
+    let mut expected = before;
+    expected.push("src".into());
+    expected.sort();
+    let mut actual: Vec<_> = fs::read_dir(project.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    actual.sort();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        fs::read_dir(project.path().join("src/components/envelope-reveal"))
+            .unwrap()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn mixed_copy_and_managed_items_keep_separate_ownership() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let source = provider.path().join("registry.json");
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    let mut manifest = manifest_with_targets(&["managed.bin"]);
+    let mut copied = manifest_with_targets(&["copied.bin"])["items"][0].clone();
+    copied["name"] = "copied".into();
+    manifest["items"].as_array_mut().unwrap().push(copied);
+    fs::write(&source, manifest.to_string()).unwrap();
+    let path = project.path();
+    let source = source.to_str().unwrap();
+    let output = run_in(path, &["add", "sample", "--managed", "--registry", source]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty());
+    let lock = path.join("friladd.lock.json");
+    let original = fs::read(&lock).unwrap();
+
+    // Recover legacy v1 preparing state before a copy. A dry run must leave it alone.
+    let staging = path.join(".friladd/preparing");
+    fs::create_dir(&staging).unwrap();
+    fs::write(staging.join("after-0"), b"leftover").unwrap();
+    assert_cli_error(
+        run_in(
+            path,
+            &["add", "copied", "--dry-run", "--json", "--registry", source],
+        ),
+        "interrupted transaction",
+    );
+    assert_eq!(fs::read(staging.join("after-0")).unwrap(), b"leftover");
+    assert!(!path.join("copied.bin").exists());
+    let copied = run_in(path, &["add", "copied", "--json", "--registry", source]);
+    assert_eq!(copied.status.code(), Some(0), "{copied:?}");
+    assert!(copied.stderr.is_empty());
+    let report: serde_json::Value = serde_json::from_slice(&copied.stdout).unwrap();
+    assert_eq!(report["data"]["managed"], false);
+    assert_eq!(report["data"]["files"][0]["action"], "install");
+    assert!(report["data"]["files"][0]["ownerAfter"].is_null());
+    assert!(!staging.exists());
+    assert_eq!(fs::read(&lock).unwrap(), original);
+
+    assert_cli_error(
+        run_in(path, &["add", "copied", "--json", "--registry", source]),
+        "already exist and are unmanaged",
+    );
+    fs::write(path.join("copied.bin"), b"user edit").unwrap();
+    assert_cli_error(
+        run_in(
+            path,
+            &["add", "copied", "--managed", "--json", "--registry", source],
+        ),
+        "will not overwrite or adopt",
+    );
+    assert_eq!(fs::read(&lock).unwrap(), original);
+    let removed = run_in(path, &["remove", "sample", "--json"]);
+    assert_eq!(removed.status.code(), Some(0), "{removed:?}");
+    assert!(removed.stderr.is_empty());
+    assert!(!path.join("managed.bin").exists());
+    assert_eq!(fs::read(path.join("copied.bin")).unwrap(), b"user edit");
+    assert!(path.join(".friladd/mutation.lock").is_file());
+    assert_eq!(fs::read_dir(path.join(".friladd")).unwrap().count(), 1);
+}
+
+#[test]
+fn copy_with_a_missing_second_artifact_leaves_the_project_empty() {
+    let provider = tempdir().unwrap();
+    let project = tempdir().unwrap();
+    let source = provider.path().join("registry.json");
+    fs::write(provider.path().join("source.bin"), b"asset").unwrap();
+    let mut manifest = manifest_with_targets(&["nested/first", "nested/second"]);
+    manifest["items"][0]["files"][1]["source"] = "missing.bin".into();
+    fs::write(&source, manifest.to_string()).unwrap();
+    assert_cli_error(
+        run_in(
+            project.path(),
+            &[
+                "add",
+                "sample",
+                "--json",
+                "--registry",
+                source.to_str().unwrap(),
+            ],
+        ),
+        "missing.bin",
+    );
+    assert_eq!(fs::read_dir(project.path()).unwrap().count(), 0);
 }
 
 #[test]
@@ -1312,6 +1422,7 @@ fn managed_add_records_ownership_is_idempotent_and_refuses_local_edits() {
     let path = project.path().display().to_string();
     let install = run(&[
         "add",
+        "--managed",
         "envelope-reveal",
         "--registry",
         &registry,
@@ -2054,7 +2165,15 @@ fn add_json_reports_dry_run_install_and_unchanged_without_human_output() {
 
     let dry_run = run_in(
         project.path(),
-        &["add", "sample", "--registry", source, "--dry-run", "--json"],
+        &[
+            "add",
+            "--managed",
+            "sample",
+            "--registry",
+            source,
+            "--dry-run",
+            "--json",
+        ],
     );
     assert_eq!(dry_run.status.code(), Some(0), "{dry_run:?}");
     assert!(dry_run.stderr.is_empty());
@@ -2068,7 +2187,7 @@ fn add_json_reports_dry_run_install_and_unchanged_without_human_output() {
 
     let install = run_in(
         project.path(),
-        &["add", "sample", "--registry", source, "--json"],
+        &["add", "--managed", "sample", "--registry", source, "--json"],
     );
     assert_eq!(install.status.code(), Some(0), "{install:?}");
     assert!(install.stderr.is_empty());
@@ -2253,7 +2372,10 @@ fn update_plans_replaces_additions_and_obsolete_files_in_one_transaction() {
         ]),
     )
     .unwrap();
-    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    let added = run_in(
+        project.path(),
+        &["add", "--managed", "sample", "--registry", &source],
+    );
     assert_eq!(added.status.code(), Some(0), "{added:?}");
     let lock_path = project.path().join("friladd.lock.json");
     let lock_before = fs::read(&lock_path).unwrap();
@@ -2384,7 +2506,10 @@ fn update_refuses_edits_provider_changes_and_implicit_candidate_selection() {
         manifest_with_targets(&["assets/model.bin"]).to_string(),
     )
     .unwrap();
-    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    let added = run_in(
+        project.path(),
+        &["add", "--managed", "sample", "--registry", &source],
+    );
     assert_eq!(added.status.code(), Some(0), "{added:?}");
     let path = project.path().to_str().unwrap();
     let no_candidate = run_in(project.path(), &["update", "sample", "--project", path]);
@@ -2431,7 +2556,10 @@ fn remove_is_transactional_and_allows_safe_missing_file_cleanup() {
         manifest_with_targets(&["assets/model.bin"]).to_string(),
     )
     .unwrap();
-    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    let added = run_in(
+        project.path(),
+        &["add", "--managed", "sample", "--registry", &source],
+    );
     assert_eq!(added.status.code(), Some(0), "{added:?}");
     let path = project.path().to_str().unwrap();
     let lock_path = project.path().join("friladd.lock.json");
@@ -2494,7 +2622,10 @@ fn restore_recreates_exact_locked_bytes_and_refuses_changed_source() {
         .to_string(),
     )
     .unwrap();
-    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    let added = run_in(
+        project.path(),
+        &["add", "--managed", "sample", "--registry", &source],
+    );
     assert_eq!(added.status.code(), Some(0), "{added:?}");
     let path = project.path().to_str().unwrap();
     let lock_path = project.path().join("friladd.lock.json");
@@ -2569,7 +2700,10 @@ fn update_requires_explicit_v2_downgrade_confirmation() {
         .unwrap();
     };
     write_manifest("2.0.0");
-    let added = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    let added = run_in(
+        project.path(),
+        &["add", "--managed", "sample", "--registry", &source],
+    );
     assert_eq!(added.status.code(), Some(0), "{added:?}");
     write_manifest("1.0.0");
     let path = project.path().to_str().unwrap();
@@ -2625,7 +2759,10 @@ fn update_preserves_repeated_source_target_declarations() {
         .to_string(),
     )
     .unwrap();
-    let add = run_in(project.path(), &["add", "sample", "--registry", &source]);
+    let add = run_in(
+        project.path(),
+        &["add", "--managed", "sample", "--registry", &source],
+    );
     assert_eq!(add.status.code(), Some(0), "{add:?}");
     let before = fs::read(project.path().join("friladd.lock.json")).unwrap();
     let update = run_in(
@@ -2723,6 +2860,7 @@ fn v2_large_binary_streams_through_verified_staging_and_v1_cap_is_preserved() {
         project.path(),
         &[
             "add",
+            "--managed",
             "model",
             "--registry",
             v2_source,
@@ -2840,10 +2978,60 @@ fn add_resolves_and_commits_a_cross_registry_dependency_graph_atomically() {
     .unwrap();
     let project_path = project.path().display().to_string();
     let global_path = global.path();
+    let copy_project = tempdir().unwrap();
+    let config = fs::read(project.path().join(".friladd.json")).unwrap();
+    fs::write(copy_project.path().join(".friladd.json"), &config).unwrap();
+    let copy = run_with_config(
+        copy_project.path(),
+        &["add", "widget", "--registry", "ui", "--json"],
+        global_path,
+    );
+    assert_eq!(copy.status.code(), Some(0), "{copy:?}");
+    assert!(copy.stderr.is_empty());
+    let copied: serde_json::Value = serde_json::from_slice(&copy.stdout).unwrap();
+    assert_eq!(copied["data"]["managed"], false);
+    assert_eq!(copied["data"]["items"][0]["itemId"], "model");
+    assert_eq!(copied["data"]["packages"][0]["name"], "react");
+    assert!(
+        copied["data"]["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|file| file["ownerAfter"].is_null())
+    );
+    assert_eq!(
+        fs::read(copy_project.path().join("components/widget.tsx")).unwrap(),
+        component_bytes
+    );
+    assert_eq!(
+        fs::read(copy_project.path().join("models/model.glb")).unwrap(),
+        asset_bytes
+    );
+    assert_eq!(
+        fs::read(copy_project.path().join(".friladd.json")).unwrap(),
+        config
+    );
+    assert_eq!(fs::read_dir(copy_project.path()).unwrap().count(), 3);
+    fs::remove_file(copy_project.path().join("components/widget.tsx")).unwrap();
+    assert_cli_error(
+        run_with_config(
+            copy_project.path(),
+            &["add", "widget", "--managed", "--registry", "ui", "--json"],
+            global_path,
+        ),
+        "conflicts with existing unmanaged files",
+    );
+    assert!(!copy_project.path().join("components/widget.tsx").exists());
+    assert!(!copy_project.path().join("friladd.lock.json").exists());
+    assert_eq!(
+        fs::read(copy_project.path().join("models/model.glb")).unwrap(),
+        asset_bytes
+    );
     let output = run_with_config(
         project.path(),
         &[
             "add",
+            "--managed",
             "widget",
             "--registry",
             "ui",
@@ -3307,6 +3495,7 @@ fn update_reconciles_the_dependency_graph_in_one_dry_run_and_transaction() {
         project.path(),
         &[
             "add",
+            "--managed",
             "widget",
             "--registry",
             "ui",
@@ -3612,6 +3801,7 @@ fn graph_install_preserves_distinct_targets_for_a_repeated_source() {
         project.path(),
         &[
             "add",
+            "--managed",
             "item",
             "--registry",
             &manifest.display().to_string(),
@@ -3679,6 +3869,7 @@ fn update_identical_snapshot_refreshes_manifest_and_artifact_provenance() {
         project.path(),
         &[
             "add",
+            "--managed",
             "asset",
             "--registry",
             &original_manifest,
@@ -3806,6 +3997,7 @@ fn diamond_dependencies_share_one_owned_item_and_remove_retains_orphans() {
         project.path(),
         &[
             "add",
+            "--managed",
             "root",
             "--registry",
             &source,

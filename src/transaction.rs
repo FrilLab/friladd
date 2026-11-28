@@ -1,5 +1,7 @@
 //! Project mutation and journal recovery. Callers plan from an ownership snapshot.
 
+mod coordination;
+
 use crate::{
     lockfile::{self, Content, Lock, Snapshot},
     planner::validate_destination,
@@ -27,6 +29,7 @@ const COMMITTED: &str = "committed";
 const BEFORE_LOCK: &str = "before-lock";
 const AFTER_LOCK: &str = "after-lock";
 const SCRATCH: &str = "scratch";
+const MUTATION_LOCK: &str = "mutation.lock";
 
 #[derive(Debug)]
 pub enum WriteSource {
@@ -42,12 +45,25 @@ pub struct Edit {
     pub write: Option<WriteSource>,
 }
 
+pub struct CopyFile {
+    pub target: String,
+    pub content: Content,
+    pub source: WriteSource,
+}
+
 pub struct Plan {
     before: Snapshot,
     next: Lock,
     edits: BTreeMap<String, Edit>,
     expectations: Vec<Expectation>,
     next_bytes: Option<Vec<u8>>,
+    kind: JournalKind,
+}
+
+#[derive(Clone, Copy)]
+enum JournalKind {
+    Managed = 1,
+    Copy = 2,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -71,13 +87,8 @@ struct Journal {
 struct Project {
     root: PathBuf,
     state: PathBuf,
-    _lock: File,
-}
-
-impl Drop for Project {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self._lock);
-    }
+    legacy_lock: Option<File>,
+    _guard: coordination::Guard,
 }
 
 impl Plan {
@@ -120,6 +131,38 @@ impl Plan {
             edits,
             expectations,
             next_bytes,
+            kind: JournalKind::Managed,
+        })
+    }
+
+    pub fn new_copy(before: Snapshot, files: Vec<CopyFile>) -> Result<Self, String> {
+        let mut expectations = BTreeMap::new();
+        let mut edits = Vec::with_capacity(files.len());
+        for file in files {
+            expectations.insert(
+                file.target.clone(),
+                Expectation {
+                    target: file.target.clone(),
+                    before: None,
+                    after: Some(file.content),
+                },
+            );
+            edits.push(Edit {
+                target: file.target,
+                before: None,
+                write: Some(file.source),
+            });
+        }
+        let edits = unique_edits(edits)?;
+        let expectations: Vec<_> = expectations.into_values().collect();
+        validate_copy(&before.lock, &expectations)?;
+        Ok(Self {
+            next: before.lock.clone(),
+            next_bytes: before.bytes.clone(),
+            before,
+            edits,
+            expectations,
+            kind: JournalKind::Copy,
         })
     }
 
@@ -251,6 +294,33 @@ fn validate_ownership(before: &Lock, after: &Lock, edits: &[Expectation]) -> Res
     Ok(())
 }
 
+fn validate_copy(lock: &Lock, edits: &[Expectation]) -> Result<(), String> {
+    if edits.len() > MAX_EDITS {
+        return Err("Transaction has too many edits".into());
+    }
+    let owners = lock.owners();
+    registry::validate_targets(
+        owners
+            .keys()
+            .copied()
+            .chain(edits.iter().map(|edit| edit.target.as_str())),
+    )?;
+    let mut total = 0;
+    for edit in edits {
+        let content = edit
+            .after
+            .as_ref()
+            .filter(|_| edit.before.is_none())
+            .ok_or("Copy transaction may only create new files")?;
+        content.validate()?;
+        total += content.size;
+        if total > MAX_OPERATION_BYTES {
+            return Err("Copy transaction exceeds the 512 MiB byte limit".into());
+        }
+    }
+    Ok(())
+}
+
 pub fn inspect(project: &Path, target: &str) -> Result<Option<Content>, String> {
     registry::validate_targets([target])?;
     inspect_at(&lockfile::canonical_project(project)?, target)
@@ -318,7 +388,8 @@ fn pending_at(root: &Path) -> Result<bool, String> {
     if !directory_exists(&state)? {
         return Ok(false);
     }
-    let mut pending = false;
+    // A copy can be interrupted before staging or after retiring the journal.
+    let mut pending = !exists_regular(&state.join(MUTATION_LOCK))?;
     for name in [PREPARING, ACTIVE, CLEANUP] {
         pending |= directory_exists(&state.join(name))?;
     }
@@ -328,7 +399,9 @@ fn pending_at(root: &Path) -> Result<bool, String> {
 pub fn recover(project: &Path) -> Result<(), String> {
     let root = lockfile::canonical_project(project)?;
     if pending_at(&root)? {
-        Project::open(root)?.recover()?;
+        let project = Project::open(root)?;
+        project.recover()?;
+        project.clean_state()?;
     }
     Ok(())
 }
@@ -343,16 +416,21 @@ fn apply_with(
     mut checkpoint: impl FnMut(&str) -> Result<(), String>,
 ) -> Result<(), String> {
     let root = lockfile::canonical_project(project)?;
-    if plan.edits.is_empty() && plan.before.bytes == plan.next_bytes && !pending_at(&root)? {
-        return plan.check_at(&root);
-    }
-    let project = Project::open(root)?;
+    let mut project = Project::open(root)?;
     project.recover()?;
+    project.clean_state()?;
     plan.check_at(&project.root)?;
     if plan.edits.is_empty() && plan.before.bytes == plan.next_bytes {
         return Ok(());
     }
 
+    ensure_directory(&project.state)?;
+    if matches!(plan.kind, JournalKind::Managed) {
+        project.acquire_legacy_lock(true)?;
+        // A v0.2.0 process may have completed before we acquired its lock.
+        project.recover()?;
+        plan.check_at(&project.root)?;
+    }
     let preparing = project.state.join(PREPARING);
     let active = project.state.join(ACTIVE);
     let result = (|| {
@@ -379,10 +457,11 @@ fn apply_with(
         checkpoint("committed")?;
         project.retire(&active)?;
         checkpoint("cleanup")?;
+        project.clean_state()?;
         Ok(())
     })();
     if let Err(error) = result {
-        return match project.recover() {
+        return match project.recover().and_then(|()| project.clean_state()) {
             Ok(()) => Err(error),
             Err(recovery) => Err(format!("{error}; {recovery}")),
         };
@@ -392,16 +471,32 @@ fn apply_with(
 
 impl Project {
     fn open(root: PathBuf) -> Result<Self, String> {
-        let state = root.join(STATE);
-        ensure_directory(&state)?;
-        let path = state.join("mutation.lock");
-        if let Ok(meta) = fs::symlink_metadata(&path)
-            && (!meta.is_file() || meta.file_type().is_symlink())
-        {
-            return Err(format!("Unsafe mutation lock: {}", path.display()));
+        let guard = coordination::Guard::acquire(&root).map_err(|error| {
+            format!(
+                "Cannot acquire project mutation lock {}: {error}",
+                root.display()
+            )
+        })?;
+        let mut project = Self {
+            state: root.join(STATE),
+            root,
+            legacy_lock: None,
+            _guard: guard,
+        };
+        project.acquire_legacy_lock(false)?;
+        Ok(project)
+    }
+
+    fn acquire_legacy_lock(&mut self, create: bool) -> Result<(), String> {
+        if self.legacy_lock.is_some() || !directory_exists(&self.state)? {
+            return Ok(());
+        }
+        let path = self.state.join(MUTATION_LOCK);
+        if !exists_regular(&path)? && !create {
+            return Ok(());
         }
         let lock = OpenOptions::new()
-            .create(true)
+            .create(create)
             .truncate(false)
             .read(true)
             .write(true)
@@ -413,11 +508,24 @@ impl Project {
                 path.display()
             )
         })?;
-        Ok(Self {
-            root,
-            state,
-            _lock: lock,
-        })
+        self.legacy_lock = Some(lock);
+        Ok(())
+    }
+
+    fn clean_state(&self) -> Result<(), String> {
+        if self.legacy_lock.is_none() {
+            match fs::remove_dir(&self.state) {
+                Ok(()) => sync_dir(&self.root)?,
+                Err(error) if error.kind() == ErrorKind::NotFound => (),
+                Err(error) => {
+                    return Err(format!(
+                        "Recovery directory cleanup failed: {}",
+                        fs_error(&self.state, error)
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     fn stage(&self, plan: Plan, work: &Path) -> Result<Journal, String> {
@@ -461,7 +569,7 @@ impl Project {
         let before_lock = stage_lock(work, BEFORE_LOCK, plan.before.bytes.as_deref())?;
         let after_lock = stage_lock(work, AFTER_LOCK, plan.next_bytes.as_deref())?;
         let journal = Journal {
-            schema_version: 1,
+            schema_version: plan.kind as u32,
             edits: plan.expectations,
             directories: directories.into_iter().collect(),
             before_lock,
@@ -699,10 +807,14 @@ fn check_created_identity(
 }
 
 fn validate_journal(journal: &Journal, before: &Lock, after: &Lock) -> Result<(), String> {
-    if journal.schema_version != 1 {
-        return Err("Unsupported transaction journal version".into());
+    match journal.schema_version {
+        1 => validate_ownership(before, after, &journal.edits)?,
+        2 if journal.before_lock == journal.after_lock && before == after => {
+            validate_copy(before, &journal.edits)?;
+        }
+        2 => return Err("Copy journal cannot change the ownership lock".into()),
+        _ => return Err("Unsupported transaction journal version".into()),
     }
-    validate_ownership(before, after, &journal.edits)?;
     let mut writable_parents = BTreeSet::new();
     for edit in &journal.edits {
         if edit.after.is_some() {

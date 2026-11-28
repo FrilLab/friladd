@@ -13,7 +13,7 @@ use std::{
 #[command(
     name = "fril",
     version,
-    about = "Install selected source files from registries",
+    about = "Distribute selected source files with optional lifecycle management",
     after_help = "Example: fril add sample --registry ./registry.json --dry-run"
 )]
 struct Cli {
@@ -34,8 +34,8 @@ enum Command {
     /// Diagnose project distribution state.
     #[command(after_help = "Example: fril doctor --project ./app --json")]
     Doctor(DoctorArgs),
-    /// Install one item from a registry.
-    #[command(after_help = "Example: fril add local/sample --project ./app --dry-run")]
+    /// Copy a registry item into the project, optionally tracking ownership.
+    #[command(after_help = "Example: fril add frilcraft/envelope-reveal --managed")]
     Add(AddArgs),
     /// List managed resources from the project lock.
     #[command(after_help = "Example: fril installed --project ./app --json")]
@@ -232,6 +232,9 @@ struct AddArgs {
     /// Project root (defaults to the current directory).
     #[arg(long, value_name = "DIRECTORY")]
     project: Option<PathBuf>,
+    /// Track installed files for status, update, remove and restore.
+    #[arg(long)]
+    managed: bool,
     /// Verify the installation plan and source bytes without writing.
     #[arg(long)]
     dry_run: bool,
@@ -952,6 +955,17 @@ fn terminal_safe(value: &str) -> String {
         })
         .collect()
 }
+fn prepare_add(project: &Path, dry_run: bool) -> Result<(), String> {
+    if dry_run {
+        if transaction::pending(project)? {
+            return Err("Project has an interrupted transaction; run fril doctor for details and retry without --dry-run to recover.".into());
+        }
+        Ok(())
+    } else {
+        transaction::recover(project)
+    }
+}
+
 fn add(args: AddArgs) -> Result<(), String> {
     let (project_config, global) = roots(args.project.clone())?;
     let project_root = project_config.parent().unwrap().to_path_buf();
@@ -1012,6 +1026,7 @@ fn add(args: AddArgs) -> Result<(), String> {
         .as_ref()
         .map(|v2| v2.select(&selected_item, None))
         .transpose()?;
+    prepare_add(&project_root, args.dry_run)?;
     if let Some(root_item_id) = v2_item.map(|item| item.id.clone()) {
         return add_v2_graph(GraphRequest {
             dry_run: args.dry_run,
@@ -1022,69 +1037,21 @@ fn add(args: AddArgs) -> Result<(), String> {
             declared_root_source: &selected_manifest,
             root_loaded: loaded,
             root_item_id: &root_item_id,
+            managed: args.managed,
             updating: None,
             allow_downgrade: false,
             root_public_identity: public_entry.as_ref().map(|entry| entry.public_identity()),
             trust_community: args.trust_community,
         });
     }
-    if !args.dry_run {
-        transaction::recover(&project_root)?;
-    }
-    let provider_id;
-    let declared_manifest_locator;
-    let manifest_source = match &loaded.source {
-        registry::RegistrySource::Local { .. } => {
-            let path = registry::canonical_local_manifest(&selected_manifest)?;
-            let url = url::Url::from_file_path(path)
-                .map_err(|_| "Cannot represent manifest provenance as a file URL")?;
-            provider_id = if let Some(v2) = &loaded.v2 {
-                format!("v2:{}", v2.id)
-            } else {
-                lockfile::v1_provider_id(url.as_str())?
-            };
-            declared_manifest_locator = url.to_string();
-            url
-        }
-        registry::RegistrySource::Remote { manifest_url }
-        | registry::RegistrySource::PublicRemote { manifest_url, .. } => {
-            let url = sanitized_remote_locator(manifest_url.as_str())?;
-            let declared = sanitized_remote_locator(&selected_manifest)?;
-            if let Some(v2) = &loaded.v2 {
-                provider_id = format!("v2:{}", v2.id);
-            } else {
-                provider_id = lockfile::v1_provider_id(url.as_str())?;
-            }
-            declared_manifest_locator = declared.to_string();
-            url
-        }
-    };
-    let item_id = v2_item.map_or(item.name.as_str(), |v2| v2.id.as_str());
-    let target_root = if let Some(v2) = v2_item {
-        let map = crate::registry_v2::TargetMap::load(&project_root)?;
-        map.root(v2.kind, None)?
-    } else {
-        None
-    };
-    let mapped_item = crate::registry::RegistryItem {
-        name: item.name.clone(),
-        description: item.description.clone(),
-        files: item
-            .files
-            .iter()
-            .map(|f| crate::registry::RegistryFile {
-                source: f.source.clone(),
-                target: target_root
-                    .as_ref()
-                    .map_or_else(|| f.target.clone(), |root| format!("{root}/{}", f.target)),
-                sha256: f.sha256.clone(),
-            })
-            .collect(),
-    };
-    let plan = planner::build_plan(&project_root, &mapped_item)?;
+    let (provider_id, declared_manifest_locator, manifest_locator) =
+        candidate_provenance(&loaded, &selected_manifest)?;
+    let manifest_source =
+        url::Url::parse(&manifest_locator).map_err(|_| "Invalid manifest provenance")?;
+    let item_id = item.name.as_str();
+    let plan = planner::build_plan(&project_root, item)?;
     let before = lockfile::load(&project_root)?;
     let manifest_digest = loaded.manifest_sha256.clone();
-    let manifest_locator = manifest_source.to_string();
     let file_records = plan
         .files
         .iter()
@@ -1101,14 +1068,7 @@ fn add(args: AddArgs) -> Result<(), String> {
                 expected_sha256: file.expected_sha256.to_ascii_lowercase(),
                 installed: lockfile::Content {
                     sha256: file.expected_sha256.to_ascii_lowercase(),
-                    size: v2_item
-                        .and_then(|v| {
-                            v.files
-                                .iter()
-                                .find(|f| f.source == file.source)
-                                .map(|f| f.size)
-                        })
-                        .unwrap_or(0),
+                    size: 0,
                 },
             })
         })
@@ -1131,10 +1091,10 @@ fn add(args: AddArgs) -> Result<(), String> {
     let mut new_item = lockfile::Item {
         provider_id: provider_id.clone(),
         item_id: item_id.to_string(),
-        version: v2_item.map(|v| v.version.clone()),
+        version: None,
         manifest_source: manifest_locator,
         manifest_sha256: manifest_digest,
-        target_root: target_root.clone(),
+        target_root: None,
         dependencies: Vec::new(),
         files: file_records,
     };
@@ -1167,7 +1127,7 @@ fn add(args: AddArgs) -> Result<(), String> {
                         &plan,
                         &provider_id,
                         item_id,
-                        v2_item,
+                        true,
                         &loaded.manifest_sha256,
                         args.dry_run,
                         "unchanged",
@@ -1199,59 +1159,49 @@ fn add(args: AddArgs) -> Result<(), String> {
     }
     if !plan.conflicts.is_empty() {
         return Err(format!(
-            "{} destination file(s) are already present and are not owned by this item",
-            plan.conflicts.len()
+            "Destination files already exist and are unmanaged: {}. Move the files or choose another project; FrilAdd will not overwrite or adopt them.",
+            plan.conflicts.join(", ")
         ));
     }
-    let contents = if let Some(v2_item) = v2_item {
-        let sizes = v2_plan_sizes(v2_item, &plan)?;
-        downloader::acquire_v2_files_with_sizes(&loaded.source, &plan, &sizes)?
-    } else {
-        downloader::acquire_files(&loaded.source, &plan)?
-    };
-    for (file, acquired) in plan.files.iter().zip(&contents.files) {
-        let installed = lockfile::Content {
-            sha256: acquired.sha256.clone(),
-            size: acquired.size,
-        };
-        if let Some(locator) = &acquired.resolved_locator
-            && let Some(record) = new_item
-                .files
-                .iter_mut()
-                .find(|record| record.target == file.target_display)
-        {
-            record.resolved_source = locator.clone();
+    let contents = downloader::acquire_files(&loaded.source, &plan)?;
+    let transaction = if args.managed {
+        for (record, acquired) in new_item.files.iter_mut().zip(&contents.files) {
+            if let Some(locator) = &acquired.resolved_locator {
+                record.resolved_source.clone_from(locator);
+            }
+            record.installed = lockfile::Content {
+                sha256: acquired.sha256.clone(),
+                size: acquired.size,
+            };
         }
-        if v2_item.is_some_and(|v| {
-            v.files
-                .iter()
-                .find(|f| f.source == file.source)
-                .is_some_and(|f| f.size != installed.size)
-        }) {
-            return Err(format!("Size mismatch for {}", file.source));
-        }
-        let record = new_item
+        next.items.push(new_item);
+        let edits = plan
             .files
-            .iter_mut()
-            .find(|record| record.target == file.target_display)
-            .ok_or_else(|| {
-                format!(
-                    "Installation plan has no ownership record for {}",
-                    file.target_display
-                )
-            })?;
-        record.installed = installed;
-    }
-    next.items.push(new_item);
-    let mut edits = Vec::with_capacity(plan.files.len());
-    for (file, acquired) in plan.files.iter().zip(contents.files) {
-        edits.push(transaction::Edit {
-            target: file.target_display.clone(),
-            before: None,
-            write: Some(transaction::WriteSource::File(acquired.path)),
-        });
-    }
-    let transaction = transaction::Plan::new(before, next, edits)?;
+            .iter()
+            .zip(contents.files)
+            .map(|(file, acquired)| transaction::Edit {
+                target: file.target_display.clone(),
+                before: None,
+                write: Some(transaction::WriteSource::File(acquired.path)),
+            })
+            .collect();
+        transaction::Plan::new(before, next, edits)?
+    } else {
+        let files = plan
+            .files
+            .iter()
+            .zip(contents.files)
+            .map(|(file, acquired)| transaction::CopyFile {
+                target: file.target_display.clone(),
+                content: lockfile::Content {
+                    sha256: acquired.sha256,
+                    size: acquired.size,
+                },
+                source: transaction::WriteSource::File(acquired.path),
+            })
+            .collect();
+        transaction::Plan::new_copy(before, files)?
+    };
     transaction.check(&project_root)?;
     if args.dry_run {
         if args.json {
@@ -1259,7 +1209,7 @@ fn add(args: AddArgs) -> Result<(), String> {
                 &plan,
                 &provider_id,
                 item_id,
-                v2_item,
+                args.managed,
                 &loaded.manifest_sha256,
                 true,
                 "install",
@@ -1268,9 +1218,10 @@ fn add(args: AddArgs) -> Result<(), String> {
             for file in &plan.files {
                 println!("Will install {}", file.target_display);
             }
-            println!(
-                "Dry run: no project files were changed. Ownership would be recorded in friladd.lock.json."
-            );
+            println!("Dry run: no project files were changed.");
+            if args.managed {
+                println!("Ownership would be recorded in friladd.lock.json.");
+            }
         }
         return Ok(());
     }
@@ -1280,7 +1231,7 @@ fn add(args: AddArgs) -> Result<(), String> {
             &plan,
             &provider_id,
             item_id,
-            v2_item,
+            args.managed,
             &loaded.manifest_sha256,
             false,
             "install",
@@ -1312,6 +1263,7 @@ struct GraphRequest<'a> {
     declared_root_source: &'a str,
     root_loaded: registry::LoadedRegistry,
     root_item_id: &'a str,
+    managed: bool,
     updating: Option<lockfile::Item>,
     allow_downgrade: bool,
     root_public_identity: Option<public_directory::PublicIdentity>,
@@ -1328,14 +1280,12 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         declared_root_source,
         root_loaded,
         root_item_id,
+        managed,
         updating,
         allow_downgrade,
         root_public_identity,
         trust_community,
     } = request;
-    if !dry_run {
-        transaction::recover(project_root)?;
-    }
     let graph = dependency::Graph::resolve(
         declared_root_source,
         root_loaded,
@@ -1513,7 +1463,7 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
             .collect::<Vec<_>>();
         if !conflict_targets.is_empty() {
             return Err(format!(
-                "Dependency {} conflicts with existing unmanaged files: {}",
+                "Dependency {} conflicts with existing unmanaged files: {}. Move the files or choose another project; FrilAdd will not overwrite or adopt them.",
                 display_graph_item(key),
                 conflict_targets.join(", ")
             ));
@@ -1636,7 +1586,6 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
 
     if pending.is_empty() {
         let root = graph.item(&graph.root)?;
-        let root_snapshot = graph.nodes[&graph.root].snapshot;
         let files = reused
             .values()
             .flat_map(|item| {
@@ -1657,9 +1606,8 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
             emit_graph_add(
                 json,
                 dry_run,
+                reused.contains_key(&graph.root),
                 &graph,
-                root,
-                &graph.snapshots[root_snapshot].loaded.manifest_sha256,
                 files,
                 &package_requirements,
             )?;
@@ -1703,6 +1651,7 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
     }
 
     let mut edits = Vec::new();
+    let mut copy_files = Vec::new();
     let mut json_files = reused
         .values()
         .flat_map(|item| {
@@ -1715,43 +1664,45 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         let node = &graph.nodes[&planned.key];
         let snapshot = &graph.snapshots[node.snapshot];
         let item = graph.item(&planned.key)?;
-        if !next
-            .providers
-            .iter()
-            .any(|provider| provider.provider_id == planned.provider_id)
-        {
-            let public_identity = if snapshot.identity == graph.snapshots[0].identity {
-                root_loaded_identity.clone()
-            } else {
-                match &snapshot.loaded.source {
+        if managed {
+            if !next
+                .providers
+                .iter()
+                .any(|provider| provider.provider_id == planned.provider_id)
+            {
+                let public_identity = if snapshot.identity == graph.snapshots[0].identity {
+                    root_loaded_identity.clone()
+                } else {
+                    match &snapshot.loaded.source {
+                        registry::RegistrySource::PublicRemote { entry, .. } => {
+                            Some(entry.public_identity())
+                        }
+                        _ => None,
+                    }
+                };
+                next.providers.push(lockfile::Provider {
+                    provider_id: planned.provider_id.clone(),
+                    declared_source: planned.declared_source.clone(),
+                    resolved_source: planned.resolved_source.clone(),
+                    manifest_sha256: snapshot.loaded.manifest_sha256.clone(),
+                    public_identity,
+                });
+            } else if planned.existing.is_some() {
+                let provider = next
+                    .providers
+                    .iter_mut()
+                    .find(|provider| provider.provider_id == planned.provider_id)
+                    .ok_or("Installed dependency item has no provider record")?;
+                provider.declared_source = planned.declared_source.clone();
+                provider.resolved_source = planned.resolved_source.clone();
+                provider.manifest_sha256 = snapshot.loaded.manifest_sha256.clone();
+                provider.public_identity = match &snapshot.loaded.source {
                     registry::RegistrySource::PublicRemote { entry, .. } => {
                         Some(entry.public_identity())
                     }
                     _ => None,
-                }
-            };
-            next.providers.push(lockfile::Provider {
-                provider_id: planned.provider_id.clone(),
-                declared_source: planned.declared_source.clone(),
-                resolved_source: planned.resolved_source.clone(),
-                manifest_sha256: snapshot.loaded.manifest_sha256.clone(),
-                public_identity,
-            });
-        } else if planned.existing.is_some() {
-            let provider = next
-                .providers
-                .iter_mut()
-                .find(|provider| provider.provider_id == planned.provider_id)
-                .ok_or("Installed dependency item has no provider record")?;
-            provider.declared_source = planned.declared_source.clone();
-            provider.resolved_source = planned.resolved_source.clone();
-            provider.manifest_sha256 = snapshot.loaded.manifest_sha256.clone();
-            provider.public_identity = match &snapshot.loaded.source {
-                registry::RegistrySource::PublicRemote { entry, .. } => {
-                    Some(entry.public_identity())
-                }
-                _ => None,
-            };
+                };
+            }
         }
         let dependencies = node
             .dependencies
@@ -1833,16 +1784,25 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
                 None => ("install", None),
             };
             if action != "unchanged" {
-                edits.push(transaction::Edit {
-                    target: file.target.clone(),
-                    before: before_content,
-                    write: Some(transaction::WriteSource::File(
-                        content_by_target
-                            .get(&file.target)
-                            .ok_or("Missing verified graph artifact bytes")?
-                            .clone(),
-                    )),
-                });
+                let source = transaction::WriteSource::File(
+                    content_by_target
+                        .get(&file.target)
+                        .ok_or("Missing verified graph artifact bytes")?
+                        .clone(),
+                );
+                if managed {
+                    edits.push(transaction::Edit {
+                        target: file.target.clone(),
+                        before: before_content,
+                        write: Some(source),
+                    });
+                } else {
+                    copy_files.push(transaction::CopyFile {
+                        target: file.target.clone(),
+                        content: file.installed.clone(),
+                        source,
+                    });
+                }
             }
             json_files.push(json_file_action(
                 &file.target,
@@ -1852,7 +1812,7 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
                 } else {
                     None
                 },
-                Some(&lock_item),
+                managed.then_some(&lock_item),
             ));
         }
         if let Some(existing) = planned.existing.as_ref() {
@@ -1872,18 +1832,25 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
                 }
             }
         }
-        if let Some(index) = next.items.iter().position(|existing| {
-            existing.provider_id == lock_item.provider_id && existing.item_id == lock_item.item_id
-        }) {
-            next.items[index] = lock_item;
-        } else {
-            next.items.push(lock_item);
+        if managed {
+            if let Some(index) = next.items.iter().position(|existing| {
+                existing.provider_id == lock_item.provider_id
+                    && existing.item_id == lock_item.item_id
+            }) {
+                next.items[index] = lock_item;
+            } else {
+                next.items.push(lock_item);
+            }
         }
     }
 
     json_files.sort_by(|left, right| left["target"].as_str().cmp(&right["target"].as_str()));
 
-    let transaction = transaction::Plan::new(before, next, edits)?;
+    let transaction = if managed {
+        transaction::Plan::new(before, next, edits)?
+    } else {
+        transaction::Plan::new_copy(before, copy_files)?
+    };
     transaction.check(project_root)?;
     if dry_run {
         if updating.is_some() {
@@ -1892,11 +1859,8 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
             emit_graph_add(
                 json,
                 true,
+                managed,
                 &graph,
-                graph.item(&graph.root)?,
-                &graph.snapshots[graph.nodes[&graph.root].snapshot]
-                    .loaded
-                    .manifest_sha256,
                 json_files,
                 &package_requirements,
             )?;
@@ -1929,11 +1893,8 @@ fn add_v2_graph(request: GraphRequest<'_>) -> Result<(), String> {
         emit_graph_add(
             json,
             false,
+            managed,
             &graph,
-            graph.item(&graph.root)?,
-            &graph.snapshots[graph.nodes[&graph.root].snapshot]
-                .loaded
-                .manifest_sha256,
             json_files,
             &package_requirements,
         )?;
@@ -2125,9 +2086,8 @@ fn graph_package_json(
 fn emit_graph_add(
     json: bool,
     dry_run: bool,
+    managed: bool,
     graph: &dependency::Graph,
-    root: &crate::registry_v2::Item,
-    root_manifest_sha256: &str,
     files: Vec<serde_json::Value>,
     packages: &BTreeMap<String, Vec<serde_json::Value>>,
 ) -> Result<(), String> {
@@ -2137,6 +2097,10 @@ fn emit_graph_add(
     let items = graph_items_json(graph)?;
     let package_data = graph_package_json(packages)?;
     let root_key = &graph.root;
+    let root = graph.item(root_key)?;
+    let root_manifest_sha256 = &graph.snapshots[graph.nodes[root_key].snapshot]
+        .loaded
+        .manifest_sha256;
     println!(
         "{}",
         serde_json::json!({
@@ -2144,6 +2108,7 @@ fn emit_graph_add(
             "command": "add",
             "data": {
                 "dryRun": dry_run,
+                "managed": managed,
                 "item": {
                     "providerId": root_key.0,
                     "itemId": root.id,
@@ -2294,7 +2259,7 @@ fn print_add_json(
     plan: &planner::InstallationPlan,
     provider_id: &str,
     item_id: &str,
-    v2_item: Option<&crate::registry_v2::Item>,
+    managed: bool,
     manifest_sha256: &str,
     dry_run: bool,
     action: &str,
@@ -2307,7 +2272,7 @@ fn print_add_json(
                 "target": file.target_display,
                 "action": action,
                 "ownerBefore": if action == "unchanged" { Some(serde_json::json!({ "providerId": provider_id, "itemId": item_id })) } else { None },
-                "ownerAfter": { "providerId": provider_id, "itemId": item_id },
+                "ownerAfter": managed.then(|| serde_json::json!({ "providerId": provider_id, "itemId": item_id })),
             })
         })
         .collect();
@@ -2319,10 +2284,11 @@ fn print_add_json(
             "command": "add",
             "data": {
                 "dryRun": dry_run,
+                "managed": managed,
                 "item": {
                     "providerId": provider_id,
                     "itemId": item_id,
-                    "version": v2_item.map(|item| item.version.as_str()),
+                    "version": null,
                     "manifestSha256": manifest_sha256,
                 },
                 "files": files,
@@ -2673,7 +2639,11 @@ fn select_mutation_item<'a>(
     matches
         .into_iter()
         .next()
-        .ok_or_else(|| format!("Managed item '{selector}' is not recorded in friladd.lock.json"))
+        .ok_or_else(|| {
+            format!(
+                "Managed item '{selector}' is not recorded in friladd.lock.json. Use `fril installed` to list tracked items. New tracked installs require `fril add --managed`."
+            )
+        })
 }
 
 fn update(args: UpdateArgs) -> Result<(), String> {
@@ -2769,6 +2739,7 @@ fn update(args: UpdateArgs) -> Result<(), String> {
             declared_root_source: &candidate_location,
             root_loaded: loaded,
             root_item_id: &root_item_id,
+            managed: true,
             updating: Some(existing),
             allow_downgrade: args.allow_downgrade,
             root_public_identity: public_entry.as_ref().map(|entry| entry.public_identity()),
@@ -3599,7 +3570,9 @@ mod tests {
             .to_string();
         assert!(help.contains("Usage: fril <COMMAND>"));
         assert!(help.contains("Example: fril add sample"));
-        assert!(help.contains("Install selected source files"));
+        assert!(
+            help.contains("Distribute selected source files with optional lifecycle management")
+        );
         let legacy_help = Cli::command()
             .name("friladd")
             .try_get_matches_from(["friladd", "--help"])
