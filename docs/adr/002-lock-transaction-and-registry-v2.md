@@ -39,3 +39,9 @@ Issue #11 introduces managed ownership and must support lifecycle commands witho
 - Any deviation requires updating this ADR and the CLI/security docs before downstream implementation. No change to Registry v1, existing command forms, or the current installer is implied by this proposal.
 
 See [Project ownership and recovery](../lock-and-recovery.md) for the implemented API behavior and limits.
+
+## v0.2.1 source distribution default
+
+Issue #50 makes ownership recording optional. `add --managed` retains the v0.2.0 policy and Lock v1. Plain `add` commits the same verified artifacts through a creation-only journal and leaves the original lock snapshot unchanged. It refuses any unmanaged destination that already exists. The shared engine checks the ownership snapshot and destination preconditions while holding project coordination.
+
+Both modes use one OS lock keyed to the actual project directory. Existing legacy lock files remain in place. A project-local copy journal can recover without keeping a permanent coordination file or relying on a system temporary directory. See the [lock and recovery contract](../lock-and-recovery.md).

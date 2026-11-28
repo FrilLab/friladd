@@ -1,16 +1,11 @@
 # Changelog
 
-## Unreleased — 0.2.x public directory integration
+## 0.2.1 candidate
 
-- Implement zero-configuration official discovery, exact qualified provider selection, per-operation community consent (including lock-based restore), lock provenance, and separate directory/provider transport for issues #39–#41. Public installs remain unavailable until canonical hosting and an active provider are verified.
-- Replace provider-specific official ID lists with a generic FrilLab namespace/repository identity rule so future official directory entries do not require CLI republication.
-- Maintain the separate `FrilLab/frilregistry` directory with local-only validation, review/suspension/rollback policy, and protected `main`. The intended canonical endpoint is `https://registry.frillab.com/registries.json`; DNS and Cloudflare deployment are not yet verified, and the FrilCraft candidate remains suspended.
-- Add strict bounded transport and directory parsing: separate fixed directory and provider hosts, DNS answer validation/pinning, disabled proxies/redirects, immutable repository path matching, and exact manifest digest verification.
-
-## 0.2.1 candidate (unpublished; NO-GO)
-
-- Prepare the compatible patch version containing curated public discovery and installation. Do not publish until the live official-provider and production qualification gates in issue #43 pass and a maintainer authorizes publication of this exact version.
-- Record current directory operations and outage, incident, admission, and maintenance procedures in [the public directory runbook](docs/operations/public-directory.md). The catalog is empty, so this candidate has no real provider installation qualification.
+- **Compatibility change**. Default `fril add` now copies selected source and declared file dependencies without tracking ownership. Pass `--managed` for the v0.2.0 installation policy. Existing managed locks, ownership, lifecycle commands, registry configurations, and both executable aliases continue to work.
+- Use one verification and recovery pipeline in both installation modes. Clean copies leave no FrilAdd project metadata. Repeated copies report an existing-file conflict and preserve local content.
+- Add zero-configuration discovery through the curated public directory. Community operations require per-invocation consent, including transitive dependencies and lock-based restore. Private and custom registry selection remain independent.
+- The [release record](docs/releases/v0.2.1.md) tracks production qualification and publication.
 
 ## 0.2.0
 

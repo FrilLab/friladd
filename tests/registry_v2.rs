@@ -256,7 +256,7 @@ fn cli_reads_provider_fixtures_and_verifies_sizes() {
     let listed = run(&["list"]);
     assert_eq!(listed.status.code(), Some(0), "{listed:?}");
     assert!(String::from_utf8_lossy(&listed.stdout).contains("triangle"));
-    let add = run(&["add", "fixture/triangle"]);
+    let add = run(&["add", "fixture/triangle", "--managed"]);
     assert_eq!(add.status.code(), Some(0), "{add:?}");
     assert!(project.path().join("friladd.lock.json").is_file());
     assert!(

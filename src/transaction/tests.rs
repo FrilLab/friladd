@@ -53,6 +53,18 @@ fn plan(project: &Path, before: Option<&[u8]>, after: &[u8]) -> Plan {
     .unwrap()
 }
 
+fn copy_plan(project: &Path) -> Plan {
+    Plan::new_copy(
+        lockfile::load(project).unwrap(),
+        vec![CopyFile {
+            target: TARGET.into(),
+            content: Content::of(NEW),
+            source: WriteSource::Bytes(NEW.to_vec()),
+        }],
+    )
+    .unwrap()
+}
+
 #[test]
 fn lock_is_deterministic_and_validates_provenance_and_portable_ownership() {
     let mut next = lock("Dir/File", NEW);
@@ -355,8 +367,75 @@ fn another_process_cannot_mutate_during_a_lock() {
     assert!(output.status.success(), "{output:?}");
     assert!(!root.path().join(TARGET).exists());
     assert!(!root.path().join(lockfile::NAME).exists());
+    assert!(!root.path().join(STATE).exists());
     drop(project);
     apply(root.path(), plan(root.path(), None, NEW)).unwrap();
+}
+
+#[test]
+fn copy_recovery_handles_termination_on_either_side_of_commit() {
+    for checkpoint in [
+        "preparing",
+        "staged",
+        "journal",
+        "directory",
+        "file",
+        "committed",
+        "cleanup",
+    ] {
+        let root = tempdir().unwrap();
+        let path = root.path();
+        let result = child(path, checkpoint)
+            .env("FRILADD_TEST_COPY", "1")
+            .status()
+            .unwrap();
+        assert_eq!(result.code(), Some(73), "{checkpoint}");
+        assert!(pending(path).unwrap(), "{checkpoint}");
+        assert!(!path.join(STATE).join(MUTATION_LOCK).exists());
+        assert!(!path.join(lockfile::NAME).exists());
+        let moved = tempdir().unwrap();
+        let relocated = moved.path().join("relocated-project");
+        fs::rename(path, &relocated).unwrap();
+        let path = &relocated;
+        recover(path).unwrap();
+        recover(path).unwrap();
+        assert!(!pending(path).unwrap());
+        assert!(!path.join(STATE).exists());
+        if matches!(checkpoint, "committed" | "cleanup") {
+            assert_eq!(fs::read(path.join(TARGET)).unwrap(), NEW);
+        } else {
+            assert_eq!(fs::read_dir(path).unwrap().count(), 0, "{checkpoint}");
+        }
+    }
+}
+
+#[test]
+fn copy_and_managed_mutations_contend_in_both_directions() {
+    for managed in [false, true] {
+        let root = tempdir().unwrap();
+        let path = root.path();
+        let first = if managed {
+            plan(path, None, NEW)
+        } else {
+            copy_plan(path)
+        };
+        apply_with(path, first, |checkpoint| {
+            if checkpoint == "preparing" {
+                let mut next = child(path, "contended");
+                if managed {
+                    next.env("FRILADD_TEST_COPY", "1");
+                }
+                let output = next.output().unwrap();
+                assert!(output.status.success(), "{output:?}");
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(fs::read(path.join(TARGET)).unwrap(), NEW);
+        assert_eq!(path.join(lockfile::NAME).exists(), managed);
+        assert_eq!(path.join(STATE).exists(), managed);
+        assert!(!pending(path).unwrap());
+    }
 }
 
 fn child(project: &Path, checkpoint: &str) -> Command {
@@ -375,8 +454,13 @@ fn mutation_worker() {
     };
     let project = PathBuf::from(project);
     let checkpoint = env::var("FRILADD_TEST_MUTATION_CHECKPOINT").unwrap();
+    let plan = if env::var_os("FRILADD_TEST_COPY").is_some() {
+        copy_plan(&project)
+    } else {
+        plan(&project, None, NEW)
+    };
     if checkpoint == "contended" {
-        let result = apply(&project, plan(&project, None, NEW));
+        let result = apply(&project, plan);
         assert!(
             result
                 .unwrap_err()
@@ -384,7 +468,7 @@ fn mutation_worker() {
         );
         return;
     }
-    apply_with(&project, plan(&project, None, NEW), |current| {
+    apply_with(&project, plan, |current| {
         if current == checkpoint {
             std::process::exit(73);
         }
@@ -439,6 +523,29 @@ fn protects_unrecognized_recovery_files_and_retries_cleanup() {
     recover(root).unwrap();
     assert_eq!(fs::read(relocated).unwrap(), b"untouched");
     assert!(!pending(root).unwrap());
+}
+
+#[test]
+fn copy_reports_failed_cleanup_and_recovers_without_ownership_metadata() {
+    let root = tempdir().unwrap();
+    let path = root.path();
+    let result = apply_with(path, copy_plan(path), |checkpoint| {
+        if checkpoint == "committed" {
+            fs::write(path.join(STATE).join(ACTIVE).join("unexpected"), b"keep").unwrap();
+        }
+        Ok(())
+    });
+    assert!(result.unwrap_err().contains("Recovery required"));
+    assert!(pending(path).unwrap());
+    assert_eq!(fs::read(path.join(TARGET)).unwrap(), NEW);
+    assert!(!path.join(lockfile::NAME).exists());
+    let unexpected = path.join(STATE).join(CLEANUP).join("unexpected");
+    assert_eq!(fs::read(&unexpected).unwrap(), b"keep");
+    fs::rename(unexpected, path.join("keep")).unwrap();
+    recover(path).unwrap();
+    assert!(!path.join(STATE).exists());
+    assert_eq!(fs::read(path.join(TARGET)).unwrap(), NEW);
+    assert_eq!(fs::read(path.join("keep")).unwrap(), b"keep");
 }
 
 #[test]

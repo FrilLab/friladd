@@ -1,10 +1,26 @@
 # FrilAdd
 
-**Install only the source files you select.** FrilAdd is a standalone Rust CLI that reads a small, versioned JSON registry and installs the declared files for one item into a project. It does not depend on FrilCraft and can be used with any registry that follows the FrilAdd manifest format.
+FrilAdd is a **source distribution CLI with optional lifecycle management**. It copies selected components, assets, animations, and their declared file dependencies into your project. Your project can build and run independently of FrilAdd.
 
-## Install
+## Quick start
 
-FrilAdd v0.2.0 is the stable provider-independent CLI release. Install the `friladd` npm package with `npm install --global friladd@0.2.0`; it exposes `fril` as the primary command and keeps `friladd` as a backward-compatible alias. Run `fril --help` or `npx --yes friladd@0.2.0 --help`. Do not use `npx fril`: the npm package remains named `friladd`. To upgrade an existing global install, run the same global install command and check `fril --version` or `friladd --version`. See [the v0.2.0 release notes](docs/releases/v0.2.0.md) for supported packaged targets and known limitations.
+With v0.2.1, install an official resource from inside your project:
+
+```sh
+npm install -g friladd
+fril add frilcraft/envelope-reveal
+```
+
+Default installation copies only the declared files. It needs no registry configuration and leaves no FrilAdd metadata in a clean project. FrilAdd reports declared external package requirements so you can install them yourself.
+
+Use `--managed` to track ownership for status, update, remove, and exact restore:
+
+```sh
+fril add frilcraft/envelope-reveal --managed
+fril status
+```
+
+Without a global install, use `npx friladd add frilcraft/envelope-reveal` with the same options. The `friladd` command remains an alias for `fril`. See the [v0.2.1 release notes](docs/releases/v0.2.1.md) for availability and the change from v0.2.0. While v0.2.1 is a candidate, use the source build below to try its behavior.
 
 ## What it does
 
@@ -17,7 +33,7 @@ FrilAdd v0.2.0 is the stable provider-independent CLI release. Install the `fril
 - Refuses existing files, symlinks in the destination path, path traversal, and unsupported file types.
 - Keeps downloaded files as source code; it never executes them or invokes npm.
 
-FrilAdd resolves dependencies only from explicitly configured registries. It reports npm package requirements with command suggestions but never executes package managers or edits package manifests. FrilAdd does not provide general shadcn Registry compatibility.
+FrilAdd resolves declared file dependencies from the selected provider and eligible public or configured registries. It reports package requirements and leaves package manifests and package manager lockfiles untouched. FrilAdd does not provide general shadcn Registry compatibility.
 
 ## Quick start from this repository
 
@@ -39,7 +55,7 @@ mkdir -p /tmp/friladd-consumer
   --project /tmp/friladd-consumer
 ```
 
-The final command writes two files under `/tmp/friladd-consumer/src/components/envelope-reveal/` and records their ownership in `friladd.lock.json` in the same recoverable transaction. Existing files are never overwritten. Repeating the same add is a no-op when the managed files are unchanged; locally modified files are preserved and block the operation. Run `--dry-run` first to verify the content and plan without writing project state.
+The final command writes two files under `/tmp/friladd-consumer/src/components/envelope-reveal/`. Repeating a copy reports an existing-file conflict, even for identical bytes. To use the managed example, start with a separate clean project and add `--managed`. An unchanged managed add is a no-op.
 
 ## CLI
 
@@ -50,11 +66,12 @@ fril registry add <alias> <path-or-https-url> [--global | --project <directory>]
 fril registry list [--global | --project <directory>] [--json]
 fril registry default <alias> [--global | --project <directory>]
 fril registry remove <alias> [--global | --project <directory>]
+fril registry discover [<registry-id>] [--json]
 fril registry verify [<registry-alias> | --registry <alias-or-source>] [--project <directory>] [--json]
-fril list [<registry-alias> | --registry <alias-or-source> | --all-registries] [--project <directory>] [--json]
-fril search <query> [--registry <alias-or-source> | --all-registries] [--project <directory>] [--json]
+fril list [<registry-alias> | --registry <alias-or-source> | --all-registries | --public] [--project <directory>] [--json]
+fril search <query> [--registry <alias-or-source> | --all-registries | --public] [--project <directory>] [--json]
 fril info <item-or-registry/item> [--registry <alias-or-source>] [--project <directory>] [--json]
-fril add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--project <directory>] [--dry-run] [--json]
+fril add <item-or-registry/item> [--registry <alias-or-path-or-https-url>] [--managed] [--project <directory>] [--dry-run] [--json]
 fril installed [--project <directory>] [--json]
 fril status [<item-or-registry/item>] [--project <directory>] [--json] [--check]
 fril update <item-or-registry/item> --registry <alias-or-source> [--version <exact-v2-version>] [--allow-downgrade] [--project <directory>] [--dry-run] [--json]
@@ -74,12 +91,12 @@ fril list --registry ./registry/registry.json --json
 fril search model --all-registries --json
 fril info triangle --registry ./registry/examples/v2/assets/registry.json --json
 fril add envelope-reveal --registry ./registry/registry.json --dry-run
-fril add envelope-reveal --registry ./registry/registry.json --project ./my-app
+fril add envelope-reveal --managed --registry ./registry/registry.json --project ./my-app
 fril installed --project ./my-app
 fril status --project ./my-app --check
 ```
 
-### Registering registries
+### Registering custom registries
 
 Project registrations are stored in `.friladd.json` at the selected project root and can be committed with the project. `registry add` defaults to project scope; `--global` stores entries in the platform application configuration directory. Global settings are changed only by commands with `--global`.
 
@@ -106,19 +123,9 @@ The configuration schema is separate from the Registry Manifest v1 format:
 }
 ```
 
-Resolution order for an unqualified item is explicit `--registry`, then project default, then global default. A `registry/item` identifier selects that alias directly; project entries shadow global entries with the same alias. `search --all-registries` and `list --all-registries` inspect the configured effective aliases only; they do not discover providers. An explicit `--registry` can be a registered alias, local manifest path, or HTTPS manifest URL. Qualified identifiers cannot be combined with `--registry`. A broken configured project default is reported instead of falling through to global configuration.
+Resolution order for an unqualified item is explicit `--registry`, then project default, then global default. A `registry/item` identifier tries configured aliases first, then the public directory. Project entries shadow global entries with the same alias. `search --all-registries` and `list --all-registries` inspect the configured effective aliases only; they do not discover providers. An explicit `--registry` can be a registered alias, local manifest path, or HTTPS manifest URL. Qualified identifiers cannot be combined with `--registry`. A broken configured project default is reported instead of falling through to global configuration.
 
 `search` matches case-insensitively across item ID, name, description, tags, and kind. Empty or whitespace-only queries are errors; no matches is a successful empty result. Multi-registry operations inspect up to 64 effective aliases and fail as a whole if any selected registry is unavailable or invalid, so failures are never hidden. `list`, `search`, and `info` accept `--json`; their versioned output is documented in the CLI contract and output schema. Metadata commands read manifests only and never fetch asset files.
-
-For example, FrilCraft is one independent third-party provider and can register like any other provider:
-
-```sh
-fril registry add frilcraft https://registry-provider.example/registry.json --global --default
-fril add envelope-reveal
-fril add frilcraft/envelope-reveal
-```
-
-The URL above is illustrative; FrilAdd contains no built-in FrilCraft URL or provider logic. Any provider can publish a compatible Registry Manifest v1 and be registered without changes to FrilAdd.
 
 ### Provider verification
 
@@ -141,9 +148,11 @@ The installer and verifier preserve exact bytes, including binary data such as G
 
 ### Managed state
 
-Successful adds record item provenance and file ownership in `friladd.lock.json` in the same recoverable transaction as the installed files. `fril installed` lists lock records without network access. `fril status` hashes only recorded targets and reports local drift without network access or writes. Use `--check` in automation to return exit status 2 when a file is modified, missing, unsafe, or unreadable.
+An add with `--managed` records ownership in `friladd.lock.json`. Managed transactions retain `.friladd/mutation.lock` for coordination with existing managed projects. v0.2.0 lockfiles continue to work. A new item added without `--managed` remains a copy even in a managed project. Repeating an add for an already tracked item preserves ownership and fails on local edits or missing files. Either mode refuses to overwrite existing unmanaged destinations. See the [lock and recovery reference](docs/lock-and-recovery.md) for details.
 
-`update` requires an explicit candidate registry manifest. It never selects a newer version automatically, refuses provider changes and local edits, and requires `--allow-downgrade` for a Registry v2 downgrade. `remove` deletes only unchanged managed files. `restore` recreates only missing files from the exact digest and locator in the lock; it never substitutes a newer source. Resolve local edits manually before retrying lifecycle operations, and keep normal project backups for recovery from user mistakes.
+`fril installed` and `fril status` read managed records offline. Use `status --check` to return exit status 2 for modified, missing, unsafe, or unreadable managed files.
+
+`update` requires an explicit candidate registry for custom sources and resolves the active directory entry for public sources. It never selects a newer version automatically, refuses provider changes and local edits, and requires `--allow-downgrade` for a Registry v2 downgrade. `remove` deletes only unchanged managed files. `restore` recreates only missing files from the exact digest and locator in the lock; it never substitutes a newer source. Resolve local edits manually before retrying lifecycle operations, and keep normal project backups for recovery from user mistakes.
 
 ## Registry manifest v1
 
@@ -183,26 +192,16 @@ The sample files live under `registry/fixtures/` and are not represented as publ
 - A local source must be a regular file inside the manifest directory. Symlinks in source paths are rejected.
 - Target ancestors are checked component by component. Any symlink is rejected, including one that currently resolves inside the project. Existing target files are reported as conflicts and block installation.
 - Registry manifests are limited to 1 MiB. Registry v1 files are limited to 10 MiB; Registry v2 files are limited to 100 MiB and each staged operation to 512 MiB. HTTPS uses a 5-second connect timeout, a 30-second manifest timeout, and a 5-minute artifact request timeout. Artifact redirects are limited to four and remain on the original HTTPS origin. Hash and v2 size verification apply while streaming after redirects.
-- All selected contents are acquired and hash-verified before the installer creates project directories. Files are staged beside their destinations, then added with a no-overwrite hard link. On a later failure, FrilAdd removes its installed files, temporary files, and newly created empty directories where possible.
+- All selected file bytes are acquired and verified before installation. Both modes use a recoverable project transaction and publish new files with no-overwrite hard links. Recovery preserves unexpected bytes and reports anything it cannot safely clean up.
 - A manifest's digest detects content that differs from that manifest; it is not a signature or publisher identity. Review the registry and source code you choose to trust.
 
-The filesystem checks protect against accidental traversal and existing symlinks. Like a normal cross-platform CLI using standard filesystem APIs, FrilAdd cannot lock a project against another process that maliciously swaps directories between checks and writes. Install into a project that is not being concurrently modified by an untrusted process. Rollback is best effort if the filesystem itself refuses cleanup; successful file creation is atomic per file, not as one all-or-nothing multi-file transaction.
+The filesystem checks protect against accidental traversal and existing symlinks. Like a normal cross-platform CLI using standard filesystem APIs, FrilAdd cannot lock a project against another process that maliciously swaps directories between checks and writes. Install into a project that is not being concurrently modified by an untrusted process. File creation is atomic per file. A journal enables rollback or cleanup after interruption.
 
 ## npm and npx
 
 The package name configured for distribution is `friladd`; its `bin` entries expose `fril` and `friladd` through the same launcher implementation. It includes one Rust executable for each supported platform (macOS ARM64, macOS x64, Linux x64, and Windows x64). Both command shims select the matching executable, forward arguments and terminal streams, and return its exit status. `fril` prints `fril VERSION`; the compatibility alias preserves `friladd VERSION`. Both operate on the same project configuration and lockfile. Use `npx friladd` or `npm exec --package=friladd -- fril`; `npx fril` is not an equivalent package invocation.
 
-Install FrilAdd globally and use the commands shown above, or invoke the `friladd` package with npx:
-
-```sh
-npx friladd --help
-npx friladd registry add sample https://example.com/registry.json --global --default
-npx friladd add envelope-reveal
-```
-
-The package provides native executables for macOS ARM64, macOS x64, Linux x64, and Windows x64. The platform-specific npm package checks run in CI.
-
-The repository `registry/` directory contains development and test fixtures only. It is **not shipped in the npm package**. FrilLab maintains a separate static directory in [FrilLab/frilregistry](https://github.com/FrilLab/frilregistry), intended for `https://registry.frillab.com/registries.json`. That canonical endpoint and its Cloudflare deployment are not yet verified live, and the directory currently has no active provider. The CLI has zero-configuration discovery/install support, but this workflow is not production-qualified. Community add, update, and restore operations require `--trust-community <registry-id>` each time, including transitive providers; lockfiles do not grant consent. You can still register an independent HTTPS Registry or supply a local manifest with `--registry`.
+The repository's `registry/` fixtures are excluded from the npm tarball. The public directory is served at `https://registry.frillab.com/registries.json`. Community add, update, and restore require `--trust-community <registry-id>` on each operation, including transitive providers. See the [directory operations runbook](docs/operations/public-directory.md) for the current production status.
 
 ## Third-party registries
 

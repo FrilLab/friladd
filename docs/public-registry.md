@@ -48,7 +48,7 @@ Locked restore uses exact recorded provenance and hashes, never current director
 
 The directory repository documents the maintainer workflow in its [contribution policy](https://github.com/FrilLab/frilregistry/blob/main/CONTRIBUTING.md), security policy, CODEOWNERS and `AGENTS.md`. Admission requires evidence of repository control, publisher identity, immutable manifest digest, artifact hashes/size/path safety, licensing/provenance and security review. Review scope and limitations must be recorded. CI performs local bounded JSON/schema/policy checks only; it does not fetch contributor URLs or execute provider code and cannot approve or merge entries. Suspension preserves history and consumer files; correction and rollback use reviewed catalog commits. Account recovery and endpoint migration remain owner-controlled; schema v1 has no client-side key rotation mechanism.
 
-Current operational blocker: the FrilLab organization currently has one member (`mors119`). The FrilCraft entry candidate is in [frilregistry PR #1](https://github.com/FrilLab/frilregistry/pull/1), pinned to a commit with successful provider consumer-install CI and matching manifest/file hashes, but its status is `suspended`. Branch protection requires a code-owner approval that is unavailable for a maintainer-authored PR. The draft single-maintainer policy has not been adopted; branch protection has not changed and the provider remains suspended. Do not merge or activate it under the proposed policy without explicit maintainer authorization.
+See the [operations runbook](operations/public-directory.md) for the observed deployment, branch rules, FrilCraft entry status, and admission evidence.
 
 ## Example fixture (not a production endpoint)
 

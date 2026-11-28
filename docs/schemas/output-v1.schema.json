@@ -132,6 +132,7 @@
             "required": ["dryRun", "item", "files"],
             "properties": {
               "dryRun": { "type": "boolean" },
+              "managed": { "type": "boolean" },
               "item": { "$ref": "#/$defs/addItem" },
               "files": { "type": "array", "items": { "$ref": "#/$defs/addFile" } },
               "items": { "type": "array", "items": { "$ref": "#/$defs/addGraphItem" } },
@@ -269,7 +270,7 @@
         "target": { "type": "string", "minLength": 1 },
         "action": { "enum": ["install", "unchanged"] },
         "ownerBefore": { "oneOf": [{ "$ref": "#/$defs/owner" }, { "type": "null" }] },
-        "ownerAfter": { "$ref": "#/$defs/owner" }
+        "ownerAfter": { "oneOf": [{ "$ref": "#/$defs/owner" }, { "type": "null" }] }
       },
       "additionalProperties": false
     },

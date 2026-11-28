@@ -2,6 +2,8 @@
 
 Thanks for helping improve FrilAdd. Contributions should keep FrilAdd independent of registry providers and preserve the existing installation safety checks.
 
+After v0.2.1 is published and verified, FrilAdd accepts maintenance changes only. See the policy in [AGENTS.md](AGENTS.md). Providers can publish new resources using the existing registry formats.
+
 ## Development setup
 
 Install stable Rust with Cargo and Node.js 22 for npm package checks. CI also verifies Rust 1.88, the minimum supported version.
@@ -32,7 +34,7 @@ The `registry/` directory is a repository-only test fixture; it must not be stag
 
 ## Architecture
 
-The command flow resolves a manifest, loads and validates Registry Manifest v1, plans destinations, acquires and hash-verifies file contents, then installs them through the safe installer. Keep registry configuration (`.friladd.json`) separate from component manifests (`registry.json`). Registry sources are independent providers; do not add a provider-specific default, URL, or installation rule to the CLI.
+The command flow resolves a manifest, loads and validates a Registry v1 or v2 manifest, plans destinations, acquires and hash-verifies file contents, then commits them through the shared transaction engine. Default copies leave no project metadata. Managed installs use the same transaction, with ownership recorded in Lock v1. Keep registry configuration (`.friladd.json`) separate from component manifests (`registry.json`). Registry sources are independent providers; do not add a provider-specific default, URL, or installation rule to the CLI.
 
 Preserve these guarantees when changing installation behavior:
 
